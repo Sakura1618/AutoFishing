@@ -8,7 +8,7 @@ import cv2
 from pathlib import Path
 
 from .config import AutoFishConfig
-from .minigame import FishTemplateMatcher, HoldAction, MinigameController, estimate_white_zone_center
+from .minigame import FishTemplateMatcher, HoldAction, MinigameController, detect_white_zone_band
 from .state_machine import AutoFishState, FishingStateMachine
 from .win32_api import VK_S, VK_W
 
@@ -23,6 +23,7 @@ class AutoFishWorker:
         log_cb: Callable[[str], None] | None = None,
         status_cb: Callable[[str], None] | None = None,
         preview_cb: Callable[[object, object], None] | None = None,
+        fps_cb: Callable[[float, float], None] | None = None,
     ) -> None:
         self.cfg = cfg
         self.detector = detector
@@ -31,6 +32,7 @@ class AutoFishWorker:
         self.log_cb = log_cb or (lambda _: None)
         self.status_cb = status_cb or (lambda _: None)
         self.preview_cb = preview_cb or (lambda _a, _b: None)
+        self.fps_cb = fps_cb or (lambda _a, _b: None)
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
         self._sm = FishingStateMachine(
@@ -50,7 +52,16 @@ class AutoFishWorker:
         except Exception:
             self._matcher = None
         self._tick_count = 0
-        self._last_det = {"has_bite": False, "has_bar": False, "bar_bbox": None, "fish_y": None, "zone_y": None, "boxes": []}
+        self._last_det = {
+            "has_bite": False,
+            "has_bar": False,
+            "bar_bbox": None,
+            "fish_y": None,
+            "zone_y": None,
+            "zone_top": None,
+            "zone_bottom": None,
+            "boxes": [],
+        }
         self._last_infer_ts = 0.0
         self._bite_hits = 0
         self._bar_hits = 0
@@ -63,6 +74,9 @@ class AutoFishWorker:
         self._mini_score = 0.0
         self._mini_template = ""
         self._last_hold_action: HoldAction | None = None
+        self._loop_stat_count = 0
+        self._infer_stat_count = 0
+        self._stat_last_ts = time.time()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -89,6 +103,7 @@ class AutoFishWorker:
         frame_interval = 1.0 / max(1, self.cfg.loop_fps)
         while not self._stop_evt.is_set():
             self._tick_count += 1
+            self._loop_stat_count += 1
             t0 = time.time()
             cap = self.capture.grab()
             frame, frame_origin = self._normalize_capture_result(cap)
@@ -101,6 +116,7 @@ class AutoFishWorker:
                     det = self.detector.detect(frame)
                 self._last_det = det
                 self._last_infer_ts = now
+                self._infer_stat_count += 1
             else:
                 det = self._last_det
             now_ms = int(time.time() * 1000)
@@ -124,11 +140,13 @@ class AutoFishWorker:
                 for b in annotated_boxes
             ]
             selected_bar = self._select_bar_bbox(annotated_boxes)
-            fish_y, zone_y = self._analyze_minigame_roi(frame, selected_bar, now_ms)
+            fish_y, zone_y, zone_top, zone_bottom = self._analyze_minigame_roi(frame, selected_bar, now_ms)
             det["bar_bbox"] = selected_bar
             det["has_bar"] = selected_bar is not None
             det["fish_y"] = fish_y
             det["zone_y"] = zone_y
+            det["zone_top"] = zone_top
+            det["zone_bottom"] = zone_bottom
             if det.get("has_bite"):
                 self._bite_hits += 1
             if det.get("has_bar"):
@@ -182,7 +200,13 @@ class AutoFishWorker:
                 fish_y = det.get("fish_y")
                 zone_y = det.get("zone_y")
                 if fish_y is not None and zone_y is not None:
-                    action = self._mini.decide(fish_y=float(fish_y), zone_center_y=float(zone_y), now_ms=now_ms)
+                    action = self._mini.decide(
+                        fish_y=float(fish_y),
+                        zone_center_y=float(zone_y),
+                        zone_top_y=det.get("zone_top"),
+                        zone_bottom_y=det.get("zone_bottom"),
+                        now_ms=now_ms,
+                    )
                     if action == HoldAction.HOLD:
                         if hasattr(self.input_ctl, "set_left_hold"):
                             self.input_ctl.set_left_hold(True)
@@ -197,6 +221,16 @@ class AutoFishWorker:
 
             yolo_preview, roi_preview = self._build_previews(frame, det)
             self.preview_cb(yolo_preview, roi_preview)
+
+            stat_now = time.time()
+            dt = stat_now - self._stat_last_ts
+            if dt >= 1.0:
+                loop_actual = self._loop_stat_count / dt
+                infer_actual = self._infer_stat_count / dt
+                self.fps_cb(loop_actual, infer_actual)
+                self._loop_stat_count = 0
+                self._infer_stat_count = 0
+                self._stat_last_ts = stat_now
 
             elapsed = time.time() - t0
             if elapsed < frame_interval:
@@ -235,6 +269,14 @@ class AutoFishWorker:
                 if zone_y is not None:
                     zy = int(float(zone_y) - y1)
                     cv2.line(roi, (0, zy), (roi.shape[1] - 1, zy), (255, 255, 255), 2)
+                zone_top = det.get("zone_top")
+                if zone_top is not None:
+                    zt = int(float(zone_top) - y1)
+                    cv2.line(roi, (0, zt), (roi.shape[1] - 1, zt), (255, 220, 80), 1)
+                zone_bottom = det.get("zone_bottom")
+                if zone_bottom is not None:
+                    zb = int(float(zone_bottom) - y1)
+                    cv2.line(roi, (0, zb), (roi.shape[1] - 1, zb), (255, 220, 80), 1)
                 cv2.putText(
                     roi,
                     f"score:{self._mini_score:.2f} {self._mini_template}",
@@ -346,7 +388,7 @@ class AutoFishWorker:
         self._mini_score = 0.0
         self._mini_template = ""
         if frame is None or bar_bbox is None:
-            return None, None
+            return None, None, None, None
         x1, y1, x2, y2 = bar_bbox
         h, w = frame.shape[:2]
         x1 = max(0, min(x1, w - 1))
@@ -354,11 +396,11 @@ class AutoFishWorker:
         y1 = max(0, min(y1, h - 1))
         y2 = max(0, min(y2, h))
         if x2 <= x1 or y2 <= y1:
-            return None, None
+            return None, None, None, None
         roi = frame[y1:y2, x1:x2]
         if self._matcher is None:
-            return None, None
-        zone_local = estimate_white_zone_center(roi)
+            return None, None, None, None
+        band = detect_white_zone_band(roi)
         hit = self._matcher.locate(roi, now_ms=now_ms)
         fish_y = None
         if hit is not None:
@@ -374,5 +416,9 @@ class AutoFishWorker:
                 fish_y = y1 + float(min_loc[1])
                 self._mini_score = 0.0
                 self._mini_template = "fallback-dark"
-        zone_y = None if zone_local is None else y1 + zone_local
-        return fish_y, zone_y
+        if band is None:
+            return fish_y, None, None, None
+        zone_y = y1 + band.center
+        zone_top = y1 + float(band.top)
+        zone_bottom = y1 + float(band.bottom)
+        return fish_y, zone_y, zone_top, zone_bottom

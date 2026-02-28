@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import queue
 import tkinter as tk
+import time
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -26,9 +27,11 @@ class AutoFishApp(tk.Tk):
 
         self._worker: AutoFishWorker | None = None
         self._log_q: queue.Queue[str] = queue.Queue()
-        self._preview_q: queue.Queue[tuple[object, object]] = queue.Queue()
+        self._preview_q: queue.Queue[tuple[object, object]] = queue.Queue(maxsize=1)
+        self._fps_q: queue.Queue[tuple[float, float]] = queue.Queue(maxsize=2)
         self._status_var = tk.StringVar(value="idle")
         self._mode_var = tk.StringVar(value="message")
+        self._fps_var = tk.StringVar(value="loop:0.0 infer:0.0 preview:0.0")
         self._window_var = tk.StringVar()
         self._model_var = tk.StringVar(value=str(pick_default_model_path(Path(__file__).resolve().parents[1])))
         self._osc_host_var = tk.StringVar(value="127.0.0.1")
@@ -45,11 +48,17 @@ class AutoFishApp(tk.Tk):
         self._roi_preview_win = None
         self._yolo_preview_label = None
         self._roi_preview_label = None
+        self._preview_count = 0
+        self._preview_last_ts = 0.0
+        self._preview_fps = 0.0
+        self._loop_fps_actual = 0.0
+        self._infer_fps_actual = 0.0
 
         self._build_ui()
         self._build_preview_windows()
         self.after(120, self._drain_logs)
-        self.after(80, self._drain_previews)
+        self.after(16, self._drain_previews)
+        self.after(120, self._drain_fps)
         self.refresh_windows()
 
     def _build_ui(self) -> None:
@@ -98,6 +107,8 @@ class AutoFishApp(tk.Tk):
         ttk.Label(btns, textvariable=self._status_var).pack(side=tk.LEFT)
         ttk.Label(btns, text="Input:").pack(side=tk.LEFT, padx=(18, 4))
         ttk.Label(btns, textvariable=self._mode_var).pack(side=tk.LEFT)
+        ttk.Label(btns, text="FPS:").pack(side=tk.LEFT, padx=(18, 4))
+        ttk.Label(btns, textvariable=self._fps_var).pack(side=tk.LEFT)
 
         self.log_box = tk.Text(root, height=16, state=tk.DISABLED)
         self.log_box.pack(fill=tk.BOTH, expand=True)
@@ -222,7 +233,8 @@ class AutoFishApp(tk.Tk):
             input_ctl=input_ctl,
             log_cb=self._log_q.put,
             status_cb=lambda s: self._status_var.set(state_to_cn(s)),
-            preview_cb=lambda a, b: self._preview_q.put((a, b)),
+            preview_cb=self._push_preview,
+            fps_cb=self._push_fps,
         )
         self._worker.start()
         self._mode_var.set("osc")
@@ -248,8 +260,11 @@ class AutoFishApp(tk.Tk):
         self.after(120, self._drain_logs)
 
     def _drain_previews(self) -> None:
+        latest = None
         while not self._preview_q.empty():
-            yolo_frame, roi_frame = self._preview_q.get_nowait()
+            latest = self._preview_q.get_nowait()
+        if latest is not None:
+            yolo_frame, roi_frame = latest
             if yolo_frame is not None:
                 self._yolo_imgtk = self._to_imgtk(yolo_frame, 860, 500)
                 if self._yolo_preview_label is not None and self._yolo_preview_label.winfo_exists():
@@ -258,7 +273,62 @@ class AutoFishApp(tk.Tk):
                 self._roi_imgtk = self._to_imgtk(roi_frame, 430, 500)
                 if self._roi_preview_label is not None and self._roi_preview_label.winfo_exists():
                     self._roi_preview_label.configure(image=self._roi_imgtk, text="")
-        self.after(80, self._drain_previews)
+            self._preview_count += 1
+        t = time.time()
+        if self._preview_last_ts <= 0.0:
+            self._preview_last_ts = t
+        elif t - self._preview_last_ts >= 1.0:
+            self._preview_fps = self._preview_count / (t - self._preview_last_ts)
+            self._preview_count = 0
+            self._preview_last_ts = t
+            self._refresh_fps_text()
+        self.after(16, self._drain_previews)
+
+    def _push_preview(self, yolo_frame, roi_frame) -> None:
+        try:
+            self._preview_q.put_nowait((yolo_frame, roi_frame))
+            return
+        except queue.Full:
+            pass
+        try:
+            _ = self._preview_q.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            self._preview_q.put_nowait((yolo_frame, roi_frame))
+        except queue.Full:
+            pass
+
+    def _push_fps(self, loop_fps: float, infer_fps: float) -> None:
+        try:
+            self._fps_q.put_nowait((loop_fps, infer_fps))
+            return
+        except queue.Full:
+            pass
+        try:
+            _ = self._fps_q.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            self._fps_q.put_nowait((loop_fps, infer_fps))
+        except queue.Full:
+            pass
+
+    def _drain_fps(self) -> None:
+        latest = None
+        while not self._fps_q.empty():
+            latest = self._fps_q.get_nowait()
+        if latest is not None:
+            self._loop_fps_actual, self._infer_fps_actual = latest
+            self._refresh_fps_text()
+        self.after(120, self._drain_fps)
+
+    def _refresh_fps_text(self) -> None:
+        self._fps_var.set(
+            f"loop:{self._loop_fps_actual:.1f} "
+            f"infer:{self._infer_fps_actual:.1f} "
+            f"preview:{self._preview_fps:.1f}"
+        )
 
     @staticmethod
     def _to_imgtk(bgr_frame, max_w: int, max_h: int):
