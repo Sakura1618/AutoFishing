@@ -27,11 +27,13 @@ class FishingStateMachine:
         self.state = AutoFishState.CAST
         self._cast_started_ms: int | None = None
         self._bar_missing_since_ms: int | None = None
+        self._bite_latched = False
 
     def reset(self) -> None:
         self.state = AutoFishState.CAST
         self._cast_started_ms = None
         self._bar_missing_since_ms = None
+        self._bite_latched = False
 
     def tick(self, now_ms: int, has_bite: bool, has_bar: bool) -> TickOutput:
         out = TickOutput()
@@ -46,7 +48,9 @@ class FishingStateMachine:
             return out
 
         if self.state == AutoFishState.WAIT_BITE:
-            if has_bite and has_bar:
+            if has_bite:
+                self._bite_latched = True
+            if self._bite_latched and has_bar:
                 self.state = AutoFishState.MINIGAME
                 self._bar_missing_since_ms = None
             return out
@@ -65,4 +69,3 @@ class FishingStateMachine:
             return out
 
         return out
-

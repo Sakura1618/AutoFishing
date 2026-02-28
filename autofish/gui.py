@@ -6,7 +6,7 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 
 from .capture import WindowCapture
-from .config import AutoFishConfig, resolve_model_path
+from .config import AutoFishConfig, pick_default_model_path, resolve_model_path
 from .input_controller import InputMode, SmartInputController
 from .osc_input import OscInputSink
 from .vision import YoloVision
@@ -25,7 +25,7 @@ class AutoFishApp(tk.Tk):
         self._status_var = tk.StringVar(value="idle")
         self._mode_var = tk.StringVar(value="message")
         self._window_var = tk.StringVar()
-        self._model_var = tk.StringVar(value=str((Path(__file__).resolve().parents[1] / "yolo_train" / "yolo11n.pt")))
+        self._model_var = tk.StringVar(value=str(pick_default_model_path(Path(__file__).resolve().parents[1])))
         self._osc_host_var = tk.StringVar(value="127.0.0.1")
         self._osc_port_var = tk.StringVar(value="9000")
         self._windows: list[tuple[int, str]] = []
@@ -104,6 +104,10 @@ class AutoFishApp(tk.Tk):
         )
         model = resolve_model_path(self._model_var.get(), Path(__file__).resolve().parents[1])
         detector = YoloVision(str(model), conf_yolo0=cfg.conf_yolo0, conf_yolo1=cfg.conf_yolo1)
+        self._log(f"model loaded: {model}")
+        self._log(f"model classes: {detector.model.names}")
+        if 0 not in detector.model.names or 1 not in detector.model.names:
+            self._log("warning: model missing class 0 or 1, detection flow may fail")
         capture = WindowCapture(hwnd=hwnd)
         sink = OscInputSink(cfg=cfg)
         input_ctl = SmartInputController(sink=sink, retry_limit=cfg.input_retry_limit, start_mode=InputMode.MESSAGE)

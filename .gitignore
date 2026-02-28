@@ -17,6 +17,7 @@ yolo_train/yolo_dataset/
 yolo_train/yolo_dataset_v2/
 yolo_train/runs/
 yolo_train/runs_yolo/
+runs/
 *.pt
 
 # OS

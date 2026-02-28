@@ -35,6 +35,7 @@ class AutoFishWorker:
             success_disappear_ms=cfg.success_disappear_ms,
         )
         self._mini = MinigameController()
+        self._tick_count = 0
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -55,9 +56,18 @@ class AutoFishWorker:
     def _run(self) -> None:
         frame_interval = 1.0 / max(1, self.cfg.loop_fps)
         while not self._stop_evt.is_set():
+            self._tick_count += 1
             t0 = time.time()
             frame = self.capture.grab()
             det = self.detector.detect(frame)
+            if self._tick_count % max(1, self.cfg.loop_fps * 2) == 0:
+                if frame is None:
+                    self.log_cb("diag: capture frame is None")
+                else:
+                    self.log_cb(
+                        f"diag: has_bite={bool(det.get('has_bite'))}, "
+                        f"has_bar={bool(det.get('has_bar'))}, fish_y={det.get('fish_y')}, zone_y={det.get('zone_y')}"
+                    )
             now_ms = int(time.time() * 1000)
             out = self._sm.tick(now_ms=now_ms, has_bite=bool(det.get("has_bite")), has_bar=bool(det.get("has_bar")))
             self.status_cb(self._sm.state.value)

@@ -30,3 +30,15 @@ def resolve_model_path(model_arg: str, app_dir: Path) -> Path:
     if local_model.exists():
         return local_model
     return model
+
+
+def pick_default_model_path(app_dir: Path) -> Path:
+    candidates = [
+        app_dir / "yolo_train" / "runs" / "autofishing_exp2" / "weights" / "best.pt",
+        app_dir / "yolo_train" / "runs" / "autofishing_exp" / "weights" / "best.pt",
+        app_dir / "yolo_train" / "yolo11n.pt",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[-1]
