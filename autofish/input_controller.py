@@ -9,10 +9,10 @@ class InputMode(str, Enum):
 
 
 class SmartInputController:
-    def __init__(self, sink, retry_limit: int = 12) -> None:
+    def __init__(self, sink, retry_limit: int = 12, start_mode: InputMode = InputMode.MESSAGE) -> None:
         self.sink = sink
         self.retry_limit = retry_limit
-        self.mode = InputMode.MESSAGE
+        self.mode = start_mode
         self._fail_count = 0
 
     def _on_result(self, ok: bool) -> None:

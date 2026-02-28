@@ -7,7 +7,7 @@ from tkinter import filedialog, ttk
 
 from .capture import WindowCapture
 from .config import AutoFishConfig, resolve_model_path
-from .input_controller import SmartInputController
+from .input_controller import InputMode, SmartInputController
 from .vision import YoloVision
 from .win32_api import Win32InputSink, list_visible_windows
 from .worker import AutoFishWorker
@@ -93,7 +93,7 @@ class AutoFishApp(tk.Tk):
         detector = YoloVision(str(model), conf_yolo0=cfg.conf_yolo0, conf_yolo1=cfg.conf_yolo1)
         capture = WindowCapture(hwnd=hwnd)
         sink = Win32InputSink(hwnd=hwnd)
-        input_ctl = SmartInputController(sink=sink, retry_limit=cfg.input_retry_limit)
+        input_ctl = SmartInputController(sink=sink, retry_limit=cfg.input_retry_limit, start_mode=InputMode.SENDINPUT)
         self._worker = AutoFishWorker(
             cfg=cfg,
             detector=detector,
@@ -124,4 +124,3 @@ class AutoFishApp(tk.Tk):
             self.log_box.see(tk.END)
             self.log_box.configure(state=tk.DISABLED)
         self.after(120, self._drain_logs)
-
