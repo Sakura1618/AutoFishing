@@ -244,6 +244,17 @@ class AutoFishWorker:
                     (255, 220, 0),
                     1,
                 )
+                action_text = self._last_hold_action.value.upper() if self._last_hold_action is not None else "NONE"
+                action_color = (0, 220, 0) if action_text == "HOLD" else (0, 120, 255) if action_text == "RELEASE" else (200, 200, 200)
+                cv2.putText(
+                    roi,
+                    f"action:{action_text}",
+                    (4, 38),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    action_color,
+                    2,
+                )
         return yolo, roi
 
     @staticmethod
