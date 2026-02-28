@@ -31,7 +31,8 @@ def test_transitions_minigame_to_success_to_cast():
 def test_wait_stage_latches_bite_then_accepts_bar_later():
     sm = FishingStateMachine(cast_wait_s=1.0, move_back_s=0.5, move_forward_s=0.5, success_disappear_ms=500)
     sm.state = AutoFishState.WAIT_BITE
-    sm.tick(now_ms=1000, has_bite=True, has_bar=False)
+    out = sm.tick(now_ms=1000, has_bite=True, has_bar=False)
+    assert out.click_hook is True
     assert sm.state == AutoFishState.WAIT_BITE
     sm.tick(now_ms=1100, has_bite=False, has_bar=True)
     assert sm.state == AutoFishState.MINIGAME

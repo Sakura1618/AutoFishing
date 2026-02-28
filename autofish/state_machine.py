@@ -13,6 +13,7 @@ class AutoFishState(str, Enum):
 @dataclass(slots=True)
 class TickOutput:
     click_cast: bool = False
+    click_hook: bool = False
     hold_back_s: float = 0.0
     click_collect: bool = False
     hold_forward_s: float = 0.0
@@ -49,6 +50,8 @@ class FishingStateMachine:
 
         if self.state == AutoFishState.WAIT_BITE:
             if has_bite:
+                if not self._bite_latched:
+                    out.click_hook = True
                 self._bite_latched = True
             if self._bite_latched and has_bar:
                 self.state = AutoFishState.MINIGAME

@@ -124,6 +124,9 @@ class AutoFishWorker:
             if out.click_cast:
                 self.input_ctl.click_left()
                 self.log_cb("cast click")
+            if out.click_hook:
+                self.input_ctl.click_left()
+                self.log_cb("hook click")
             if out.hold_back_s > 0:
                 if hasattr(self.input_ctl, "hold_key_for"):
                     self.input_ctl.hold_key_for(VK_S, out.hold_back_s)
