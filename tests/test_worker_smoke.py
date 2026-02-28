@@ -18,8 +18,14 @@ class FakeCapture:
 
 
 class FakeInput:
+    def __init__(self) -> None:
+        self.hold_states = []
+
     def click_left(self):
         return True
+
+    def set_left_hold(self, hold: bool):
+        self.hold_states.append(bool(hold))
 
 
 def test_worker_starts_and_stops_cleanly():
@@ -123,3 +129,33 @@ def test_minigame_ready_timeout_fallback():
     worker._mini_enter_ms = 1000
     worker._mini_ready = False
     assert worker._update_minigame_ready(zone_y=None, now_ms=2205) is True
+
+
+def test_apply_left_hold_forces_release_after_max_hold():
+    fake_in = FakeInput()
+    worker = AutoFishWorker(
+        cfg=AutoFishConfig(loop_fps=10),
+        detector=FakeDetector(),
+        capture=FakeCapture(),
+        input_ctl=fake_in,
+        log_cb=lambda _x: None,
+    )
+    worker._max_hold_ms = 50
+    worker._apply_left_hold(True, now_ms=1000)
+    worker._apply_left_hold(True, now_ms=1060)
+    assert fake_in.hold_states[0] is True
+    assert fake_in.hold_states[-1] is False
+
+
+def test_apply_left_hold_respects_cooldown():
+    fake_in = FakeInput()
+    worker = AutoFishWorker(
+        cfg=AutoFishConfig(loop_fps=10),
+        detector=FakeDetector(),
+        capture=FakeCapture(),
+        input_ctl=fake_in,
+        log_cb=lambda _x: None,
+    )
+    worker._hold_cooldown_until_ms = 2000
+    worker._apply_left_hold(True, now_ms=1500)
+    assert fake_in.hold_states == []

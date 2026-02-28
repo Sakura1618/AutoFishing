@@ -85,6 +85,12 @@ class AutoFishWorker:
         self._mini_drop_start_y: float | None = None
         self._mini_drop_need_px = 3.0
         self._mini_wait_max_ms = 1200
+        self._mini_signal_timeout_ms = 100
+        self._last_mini_signal_ms = 0
+        self._left_hold_active = False
+        self._left_hold_since_ms = 0
+        self._max_hold_ms = 260
+        self._hold_cooldown_until_ms = 0
         self._roi_smooth_alpha = 0.2
         self._roi_jump_px = 6
         self._signal_alpha = 0.35
@@ -200,6 +206,10 @@ class AutoFishWorker:
                 self._smooth_values.clear()
                 for hist in self._signal_hist.values():
                     hist.clear()
+                self._last_mini_signal_ms = 0
+                self._left_hold_active = False
+                self._left_hold_since_ms = 0
+                self._hold_cooldown_until_ms = 0
                 self.input_ctl.click_left()
                 self.log_cb(f"cast click (loop={self._loop_id})")
             if out.click_hook:
@@ -224,10 +234,10 @@ class AutoFishWorker:
                 zone_y = det.get("zone_y")
                 ready = self._update_minigame_ready(zone_y=None if zone_y is None else float(zone_y), now_ms=now_ms)
                 if not ready:
-                    if hasattr(self.input_ctl, "set_left_hold"):
-                        self.input_ctl.set_left_hold(False)
+                    self._apply_left_hold(False, now_ms=now_ms)
                     self._last_hold_action = None
                 elif fish_y is not None and zone_y is not None:
+                    self._last_mini_signal_ms = now_ms
                     action = self._mini.decide(
                         fish_y=float(fish_y),
                         zone_center_y=float(zone_y),
@@ -236,16 +246,17 @@ class AutoFishWorker:
                         now_ms=now_ms,
                     )
                     if action == HoldAction.HOLD:
-                        if hasattr(self.input_ctl, "set_left_hold"):
-                            self.input_ctl.set_left_hold(True)
+                        self._apply_left_hold(True, now_ms=now_ms)
                         if self._last_hold_action != action:
                             self.log_cb("minigame action: HOLD")
                     elif action == HoldAction.RELEASE:
-                        if hasattr(self.input_ctl, "set_left_hold"):
-                            self.input_ctl.set_left_hold(False)
+                        self._apply_left_hold(False, now_ms=now_ms)
                         if self._last_hold_action != action:
                             self.log_cb("minigame action: RELEASE")
                     self._last_hold_action = action
+                elif now_ms - self._last_mini_signal_ms >= self._mini_signal_timeout_ms:
+                    self._apply_left_hold(False, now_ms=now_ms)
+                    self._last_hold_action = None
 
             yolo_preview, roi_preview = self._build_previews(frame, det)
             self.preview_cb(yolo_preview, roi_preview)
@@ -489,15 +500,13 @@ class AutoFishWorker:
             self._mini_enter_ms = now_ms
             self._mini_prev_zone_y = None
             self._mini_drop_start_y = None
-            if hasattr(self.input_ctl, "set_left_hold"):
-                self.input_ctl.set_left_hold(False)
+            self._apply_left_hold(False, now_ms=now_ms)
             self.log_cb("minigame warmup: waiting for bar drop")
         elif self._last_sm_state == AutoFishState.MINIGAME:
             self._mini_ready = False
             self._mini_prev_zone_y = None
             self._mini_drop_start_y = None
-            if hasattr(self.input_ctl, "set_left_hold"):
-                self.input_ctl.set_left_hold(False)
+            self._apply_left_hold(False, now_ms=now_ms)
         self._last_sm_state = self._sm.state
 
     def _update_minigame_ready(self, zone_y: float | None, now_ms: int) -> bool:
@@ -520,6 +529,22 @@ class AutoFishWorker:
             self.log_cb("minigame warmup: bar drop detected, control enabled")
             return True
         return False
+
+    def _apply_left_hold(self, want_hold: bool, now_ms: int) -> None:
+        if want_hold and now_ms < self._hold_cooldown_until_ms:
+            want_hold = False
+        if want_hold and self._left_hold_active:
+            if now_ms - self._left_hold_since_ms >= self._max_hold_ms:
+                want_hold = False
+                self._hold_cooldown_until_ms = now_ms + 60
+                self.log_cb("minigame guard: force release from long hold")
+        if want_hold == self._left_hold_active:
+            return
+        if hasattr(self.input_ctl, "set_left_hold"):
+            self.input_ctl.set_left_hold(want_hold)
+        self._left_hold_active = want_hold
+        if want_hold:
+            self._left_hold_since_ms = now_ms
 
     def _stabilize_measurements(self, fish_y, zone_y, zone_top, zone_bottom):
         fish_s = self._smooth_signal("fish_y", fish_y)
