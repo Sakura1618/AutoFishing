@@ -6,15 +6,15 @@ from pathlib import Path
 
 @dataclass(slots=True)
 class AutoFishConfig:
-    conf_yolo0: float = 0.5
-    conf_yolo1: float = 0.5
+    conf_yolo0: float = 0.75
+    conf_yolo1: float = 0.75
     roi_expand: float = 0.2
     success_disappear_ms: int = 500
-    cast_wait_s: float = 0.5
+    cast_wait_s: float = 1.0
     move_back_s: float = 0.5
     move_forward_s: float = 0.5
-    loop_fps: int = 20
-    infer_fps: int = 30
+    loop_fps: int = 60
+    infer_fps: int = 60
     imgsz: int = 640
     input_retry_limit: int = 12
     osc_host: str = "127.0.0.1"

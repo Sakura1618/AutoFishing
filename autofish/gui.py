@@ -33,10 +33,10 @@ class AutoFishApp(tk.Tk):
         self._model_var = tk.StringVar(value=str(pick_default_model_path(Path(__file__).resolve().parents[1])))
         self._osc_host_var = tk.StringVar(value="127.0.0.1")
         self._osc_port_var = tk.StringVar(value="9000")
-        self._conf0_var = tk.StringVar(value="0.50")
-        self._conf1_var = tk.StringVar(value="0.50")
-        self._infer_fps_var = tk.StringVar(value="30")
-        self._loop_fps_var = tk.StringVar(value="20")
+        self._conf0_var = tk.StringVar(value="0.75")
+        self._conf1_var = tk.StringVar(value="0.75")
+        self._infer_fps_var = tk.StringVar(value="60")
+        self._loop_fps_var = tk.StringVar(value="60")
         self._imgsz_var = tk.StringVar(value="640")
         self._windows: list[tuple[int, str]] = []
         self._yolo_imgtk = None

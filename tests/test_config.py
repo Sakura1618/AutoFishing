@@ -5,11 +5,14 @@ from autofish.config import AutoFishConfig, pick_default_model_path, resolve_mod
 
 def test_default_config_values():
     cfg = AutoFishConfig()
-    assert cfg.cast_wait_s == 0.5
+    assert cfg.conf_yolo0 == 0.75
+    assert cfg.conf_yolo1 == 0.75
+    assert cfg.cast_wait_s == 1.0
     assert cfg.move_back_s == 0.5
     assert cfg.move_forward_s == 0.5
     assert cfg.success_disappear_ms == 500
-    assert cfg.infer_fps == 30
+    assert cfg.infer_fps == 60
+    assert cfg.loop_fps == 60
 
 
 def test_resolve_model_path_prefers_explicit(tmp_path: Path):
