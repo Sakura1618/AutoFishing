@@ -16,12 +16,17 @@ powershell -ExecutionPolicy Bypass -File "D:\Repositories\AutoFishing\run_autofi
 
 1. Select target window from list (`VRChat`).
 2. Confirm model path (`.pt`) in GUI.
+3. Confirm OSC host/port (`127.0.0.1:9000` by default).
 3. Click `Start`.
 4. Click `Stop` for safe release.
 
 ## Notes
 
-- Input mode defaults to HWND message mode; fallback to global input is automatic when message input keeps failing.
+- Input is sent through VRChat OSC (`/avatar/parameters/*`), not OS keyboard/mouse injection.
+- Required avatar parameters (bool):
+  - `AutoFish_Click`
+  - `AutoFish_Hold`
+  - `AutoFish_Back`
+  - `AutoFish_Forward`
 - `yolo_train` remains dedicated to manual model training only.
 - Default fishing sequence follows `自动钓鱼.txt`.
-

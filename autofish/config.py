@@ -15,6 +15,12 @@ class AutoFishConfig:
     move_forward_s: float = 0.5
     loop_fps: int = 20
     input_retry_limit: int = 12
+    osc_host: str = "127.0.0.1"
+    osc_port: int = 9000
+    osc_param_click: str = "AutoFish_Click"
+    osc_param_hold: str = "AutoFish_Hold"
+    osc_param_back: str = "AutoFish_Back"
+    osc_param_forward: str = "AutoFish_Forward"
 
 
 def resolve_model_path(model_arg: str, app_dir: Path) -> Path:
@@ -25,4 +31,3 @@ def resolve_model_path(model_arg: str, app_dir: Path) -> Path:
     if local_model.exists():
         return local_model
     return model
-

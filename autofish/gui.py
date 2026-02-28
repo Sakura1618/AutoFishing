@@ -8,8 +8,9 @@ from tkinter import filedialog, ttk
 from .capture import WindowCapture
 from .config import AutoFishConfig, resolve_model_path
 from .input_controller import InputMode, SmartInputController
+from .osc_input import OscInputSink
 from .vision import YoloVision
-from .win32_api import Win32InputSink, list_visible_windows
+from .win32_api import list_visible_windows
 from .worker import AutoFishWorker
 
 
@@ -25,6 +26,8 @@ class AutoFishApp(tk.Tk):
         self._mode_var = tk.StringVar(value="message")
         self._window_var = tk.StringVar()
         self._model_var = tk.StringVar(value=str((Path(__file__).resolve().parents[1] / "yolo_train" / "yolo11n.pt")))
+        self._osc_host_var = tk.StringVar(value="127.0.0.1")
+        self._osc_port_var = tk.StringVar(value="9000")
         self._windows: list[tuple[int, str]] = []
 
         self._build_ui()
@@ -46,6 +49,13 @@ class AutoFishApp(tk.Tk):
         ttk.Label(top, text="Model").grid(row=1, column=0, sticky="w")
         ttk.Entry(top, textvariable=self._model_var, width=62).grid(row=1, column=1, sticky="ew", padx=8)
         ttk.Button(top, text="Browse", command=self.pick_model).grid(row=1, column=2, padx=4)
+
+        ttk.Label(top, text="OSC").grid(row=2, column=0, sticky="w")
+        osc_row = ttk.Frame(top)
+        osc_row.grid(row=2, column=1, sticky="ew", padx=8)
+        ttk.Entry(osc_row, textvariable=self._osc_host_var, width=24).pack(side=tk.LEFT)
+        ttk.Label(osc_row, text=":").pack(side=tk.LEFT, padx=4)
+        ttk.Entry(osc_row, textvariable=self._osc_port_var, width=8).pack(side=tk.LEFT)
         top.columnconfigure(1, weight=1)
 
         btns = ttk.Frame(root)
@@ -88,12 +98,15 @@ class AutoFishApp(tk.Tk):
         if not hwnd:
             self._log("no target window selected")
             return
-        cfg = AutoFishConfig()
+        cfg = AutoFishConfig(
+            osc_host=self._osc_host_var.get().strip() or "127.0.0.1",
+            osc_port=int(self._osc_port_var.get().strip() or "9000"),
+        )
         model = resolve_model_path(self._model_var.get(), Path(__file__).resolve().parents[1])
         detector = YoloVision(str(model), conf_yolo0=cfg.conf_yolo0, conf_yolo1=cfg.conf_yolo1)
         capture = WindowCapture(hwnd=hwnd)
-        sink = Win32InputSink(hwnd=hwnd)
-        input_ctl = SmartInputController(sink=sink, retry_limit=cfg.input_retry_limit, start_mode=InputMode.SENDINPUT)
+        sink = OscInputSink(cfg=cfg)
+        input_ctl = SmartInputController(sink=sink, retry_limit=cfg.input_retry_limit, start_mode=InputMode.MESSAGE)
         self._worker = AutoFishWorker(
             cfg=cfg,
             detector=detector,
@@ -103,7 +116,7 @@ class AutoFishApp(tk.Tk):
             status_cb=self._status_var.set,
         )
         self._worker.start()
-        self._mode_var.set(input_ctl.mode.value)
+        self._mode_var.set("osc")
         self._log("start requested")
 
     def stop_worker(self) -> None:
