@@ -35,6 +35,14 @@ class TemplatePack:
     edge: np.ndarray
 
 
+@dataclass(slots=True)
+class WhiteZoneBand:
+    top: int
+    bottom: int
+    center: float
+    strength: float
+
+
 class MinigameController:
     def __init__(
         self,
@@ -49,7 +57,10 @@ class MinigameController:
         brake_window_px: float = 20.0,
         brake_base_px: float = 3.0,
         brake_speed_gain: float = 0.08,
+        target_bias_px: float = 0.0,
+        edge_guard_px: float = 3.5,
         duration_scale_px: float = 28.0,
+        hold_time_factor: float = 0.65,
         min_hold_ms: int = 45,
         max_hold_ms: int = 180,
         min_release_ms: int = 40,
@@ -66,7 +77,10 @@ class MinigameController:
         self.brake_window_px = max(0.0, brake_window_px)
         self.brake_base_px = max(0.0, brake_base_px)
         self.brake_speed_gain = max(0.0, brake_speed_gain)
+        self.target_bias_px = float(target_bias_px)
+        self.edge_guard_px = max(0.0, edge_guard_px)
         self.duration_scale_px = max(1.0, duration_scale_px)
+        self.hold_time_factor = min(1.0, max(0.2, hold_time_factor))
         self.min_hold_ms = min_hold_ms
         self.max_hold_ms = max(max_hold_ms, min_hold_ms)
         self.min_release_ms = min_release_ms
@@ -85,7 +99,14 @@ class MinigameController:
         self.last_mode: str = self._mode.value
         self.last_pred_fish_y: float | None = None
 
-    def decide(self, fish_y: float, zone_center_y: float, now_ms: int | None = None) -> HoldAction:
+    def decide(
+        self,
+        fish_y: float,
+        zone_center_y: float,
+        now_ms: int | None = None,
+        zone_top_y: float | None = None,
+        zone_bottom_y: float | None = None,
+    ) -> HoldAction:
         if now_ms is None:
             now_ms = int(cv2.getTickCount() * 1000 / cv2.getTickFrequency())
         first_sample = self._last_ts_ms is None
@@ -97,7 +118,21 @@ class MinigameController:
             self._fish_vel_ema = (1.0 - self.fish_vel_alpha) * self._fish_vel_ema + self.fish_vel_alpha * fish_v
             self._zone_vel_ema = (1.0 - self.zone_vel_alpha) * self._zone_vel_ema + self.zone_vel_alpha * zone_v
         fish_pred = fish_y + self._fish_vel_ema * self.predict_s
-        error = zone_center_y - fish_pred
+        edge_dead_zone = self.dead_zone_px
+        zone_target = zone_center_y + self.target_bias_px
+        error = zone_target - fish_pred
+        force_action: HoldAction | None = None
+        if zone_top_y is not None and zone_bottom_y is not None and zone_bottom_y > zone_top_y:
+            zone_target = min(max(zone_target, zone_top_y), zone_bottom_y)
+            height = max(1.0, zone_bottom_y - zone_top_y)
+            edge_dead_zone = max(self.dead_zone_px, height * 0.2)
+            error = zone_target - fish_pred
+            dist_to_top = fish_pred - zone_top_y
+            dist_to_bottom = zone_bottom_y - fish_pred
+            if dist_to_top <= self.edge_guard_px:
+                force_action = HoldAction.RELEASE
+            elif dist_to_bottom <= self.edge_guard_px:
+                force_action = HoldAction.HOLD
         d_error = 0.0 if self._last_error is None else (error - self._last_error)
         control = self.kp * error + self.kd * d_error
         self.last_control = float(control)
@@ -111,16 +146,19 @@ class MinigameController:
             self._mode = TrackMode.TRACK
 
         want_hold = self._pressed
-        if self._mode == TrackMode.CATCHUP:
+        if force_action is not None:
+            want_hold = force_action == HoldAction.HOLD
+            self._mode = TrackMode.BRAKE
+        elif self._mode == TrackMode.CATCHUP:
             want_hold = error > 0
         else:
             if self._pressed:
                 want_hold = not self._should_pre_brake_hold(error)
-                if error < -self.dead_zone_px:
+                if error < -edge_dead_zone:
                     want_hold = False
             else:
                 want_hold = self._should_pre_brake_release(error)
-                if error > self.dead_zone_px:
+                if error > edge_dead_zone:
                     want_hold = True
 
         if self._mode == TrackMode.TRACK and want_hold != self._pressed:
@@ -138,6 +176,13 @@ class MinigameController:
             self._last = HoldAction.HOLD if want_hold else HoldAction.RELEASE
             return self._last
 
+        if force_action is not None and want_hold != self._pressed:
+            # Emergency edge guard: switch immediately and enforce minimal hold/release time.
+            self._pressed = want_hold
+            self._switch_allowed_at_ms = now_ms + self._next_lock_ms(control=control, for_hold=want_hold)
+            self._last = HoldAction.HOLD if want_hold else HoldAction.RELEASE
+            return self._last
+
         if want_hold != self._pressed and now_ms >= self._switch_allowed_at_ms:
             self._pressed = want_hold
             self._switch_allowed_at_ms = now_ms + self._next_lock_ms(control=control, for_hold=want_hold)
@@ -148,7 +193,8 @@ class MinigameController:
     def _next_lock_ms(self, control: float, for_hold: bool) -> int:
         strength = min(1.0, abs(control) / self.duration_scale_px)
         if for_hold:
-            return int(round(self.min_hold_ms + (self.max_hold_ms - self.min_hold_ms) * strength))
+            base = self.min_hold_ms + (self.max_hold_ms - self.min_hold_ms) * strength
+            return int(round(base * self.hold_time_factor))
         return int(round(self.min_release_ms + (self.max_release_ms - self.min_release_ms) * strength))
 
     def _should_pre_brake_hold(self, error: float) -> bool:
@@ -242,14 +288,40 @@ class FishTemplateMatcher:
 
 
 def estimate_white_zone_center(roi_bgr: np.ndarray) -> float | None:
+    band = detect_white_zone_band(roi_bgr)
+    return None if band is None else band.center
+
+
+def detect_white_zone_band(roi_bgr: np.ndarray) -> WhiteZoneBand | None:
     if roi_bgr is None or roi_bgr.size == 0:
         return None
     gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
     _, mask = cv2.threshold(gray, 205, 255, cv2.THRESH_BINARY)
-    ys = np.where(mask > 0)[0]
-    if ys.size == 0:
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((2, 2), dtype=np.uint8))
+    h, w = mask.shape[:2]
+    if h < 5 or w < 5:
         return None
-    return float(np.mean(ys))
+    row_ratio = (mask > 0).mean(axis=1)
+    rows = np.where(row_ratio >= 0.18)[0]
+    if rows.size == 0:
+        return None
+    runs: list[tuple[int, int]] = []
+    start = int(rows[0])
+    prev = int(rows[0])
+    for y in rows[1:]:
+        y = int(y)
+        if y == prev + 1:
+            prev = y
+            continue
+        runs.append((start, prev))
+        start = y
+        prev = y
+    runs.append((start, prev))
+    top, bottom = max(runs, key=lambda r: (r[1] - r[0] + 1))
+    if bottom - top + 1 < 3:
+        return None
+    strength = float(row_ratio[top : bottom + 1].mean())
+    return WhiteZoneBand(top=top, bottom=bottom, center=(top + bottom) / 2.0, strength=strength)
 
 
 def _resize_edge(edge: np.ndarray, scale: float) -> np.ndarray:
