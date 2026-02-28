@@ -9,6 +9,7 @@ def test_default_config_values():
     assert cfg.move_back_s == 0.5
     assert cfg.move_forward_s == 0.5
     assert cfg.success_disappear_ms == 500
+    assert cfg.infer_fps == 30
 
 
 def test_resolve_model_path_prefers_explicit(tmp_path: Path):

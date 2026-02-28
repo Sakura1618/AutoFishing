@@ -14,7 +14,7 @@ class AutoFishConfig:
     move_back_s: float = 0.5
     move_forward_s: float = 0.5
     loop_fps: int = 20
-    infer_fps: int = 10
+    infer_fps: int = 30
     imgsz: int = 640
     input_retry_limit: int = 12
     osc_host: str = "127.0.0.1"
