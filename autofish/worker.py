@@ -7,9 +7,18 @@ from pathlib import Path
 from typing import Callable
 
 import cv2
+import numpy as np
 
 from .config import AutoFishConfig
-from .minigame import FishTemplateMatcher, HoldAction, MinigameController, detect_dark_blob_center, detect_white_zone_band
+from .minigame import (
+    FishTemplateMatcher,
+    HoldAction,
+    MinigameController,
+    detect_fish_by_color_peak,
+    detect_fish_by_motion_peak,
+    detect_fish_by_width_peak,
+    detect_white_zone_band,
+)
 from .state_machine import AutoFishState, FishingStateMachine
 from .win32_api import VK_S, VK_W
 
@@ -36,35 +45,30 @@ class AutoFishWorker:
         self.fps_cb = fps_cb or (lambda _a, _b: None)
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
+        self.screen_height = 1080
+        self._screen_bottom_margin_px = 50.0
         self._sm = FishingStateMachine(
             cast_wait_s=cfg.cast_wait_s,
             move_back_s=cfg.move_back_s,
             move_forward_s=cfg.move_forward_s,
             success_disappear_ms=cfg.success_disappear_ms,
         )
-        self._mini = MinigameController(hold_decreases_y=False)
-        self._template_file = Path.cwd() / "img" / "fish.png"
+        self._mini = MinigameController(hold_decreases_y=True)
+        app_dir = Path(__file__).resolve().parents[1]
+        self._template_file = app_dir / "img" / "fish.png"
         try:
             if self._template_file.exists():
                 self._matcher = FishTemplateMatcher.from_template_file(
                     self._template_file,
-                    threshold=0.55,
-                    scales=(0.9, 1.0, 1.1),
+                    threshold=0.43,
+                    scales=(0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 1.00),
                     lost_hold_ms=300,
                     local_expand=2.1,
                     local_track_ms=300,
                     smooth_alpha=0.40,
                 )
             else:
-                self._matcher = FishTemplateMatcher.from_template_dir(
-                    Path.cwd() / "img",
-                    threshold=0.55,
-                    scales=(0.9, 1.0, 1.1),
-                    lost_hold_ms=300,
-                    local_expand=2.1,
-                    local_track_ms=300,
-                    smooth_alpha=0.40,
-                )
+                self._matcher = None
         except Exception:
             self._matcher = None
         self._tick_count = 0
@@ -87,8 +91,12 @@ class AutoFishWorker:
         self._await_next_yolo1 = False
         self._roi_anchor_bbox = None
         self._roi_anchor_last_seen_ms = 0
+        self._roi_lock_delay_ms = int(cfg.roi_lock_delay_ms)
+        self._roi_lock_candidate_bbox = None
+        self._roi_lock_candidate_ms = 0
         self._mini_score = 0.0
         self._mini_template = ""
+        self._mini_scale: float | None = None
         self._last_hold_action: HoldAction | None = None
         self._loop_stat_count = 0
         self._infer_stat_count = 0
@@ -98,10 +106,33 @@ class AutoFishWorker:
         self._mini_enter_ms = 0
         self._mini_prev_zone_y: float | None = None
         self._mini_drop_start_y: float | None = None
-        self._mini_drop_need_px = 3.0
-        self._mini_wait_max_ms = 1200
-        self._mini_signal_timeout_ms = 100
+        self._mini_drop_need_px = float(cfg.mini_drop_need_px)
+        self._mini_wait_max_ms = int(cfg.mini_wait_max_ms)
+        self._mini_signal_timeout_ms = int(cfg.mini_signal_timeout_ms)
         self._last_mini_signal_ms = 0
+        self._mini_last_ctrl_ms = 0
+        self._mini_last_fish_y: float | None = None
+        self._mini_fish_vel_ema = 0.0
+        self._mini_vel_alpha = float(cfg.mini_vel_alpha)
+        self._mini_predict_ms = int(cfg.mini_predict_ms)
+        self._mini_err_prev: float | None = None
+        self._mini_mode = "idle"
+        self._mini_brake_until_ms = 0
+        self._mini_dead_px = float(cfg.mini_dead_px)
+        self._mini_far_px = float(cfg.mini_far_px)
+        self._mini_edge_guard_px = float(cfg.mini_edge_guard_px)
+        self._mini_hold_interval_track_ms = int(cfg.mini_hold_interval_track_ms)
+        self._mini_hold_interval_catch_ms = int(cfg.mini_hold_interval_catch_ms)
+        self._mini_hold_last_ms = 0
+        self._mini_hold_active = False
+        self._mini_hold_until_ms = 0
+        self._mini_release_until_ms = 0
+        self._mini_release_lock_ms = 80
+        self._mini_track_px_ref = float(cfg.mini_track_px_ref)
+        self._mini_up_full_ms = float(cfg.mini_up_full_ms)
+        self._mini_hold_min_ms = int(cfg.mini_hold_min_ms)
+        self._mini_hold_max_ms = int(cfg.mini_hold_max_ms)
+        self._mini_brake_ms = int(cfg.mini_brake_ms)
         self._left_hold_active = False
         self._left_hold_since_ms = 0
         self._max_hold_ms = 260
@@ -128,6 +159,15 @@ class AutoFishWorker:
         self._signal_alpha = 0.35
         self._signal_jump_px = 15.0
         self._smooth_values: dict[str, float] = {}
+        self._roi_prev_gray: np.ndarray | None = None
+        self._fish_prev_gray: np.ndarray | None = None
+        self._roi_motion_dx = 0.0
+        self._roi_motion_dy = 0.0
+        self._roi_motion_alpha = 0.45
+        self._roi_motion_max_px = 10.0
+        self._roi_motion_min_resp = 0.12
+        self._roi_stab_dx = 0.0
+        self._roi_stab_dy = 0.0
         self._signal_hist: dict[str, deque[float]] = {
             "fish_y": deque(maxlen=3),
             "zone_top": deque(maxlen=3),
@@ -142,6 +182,8 @@ class AutoFishWorker:
         self._thread.start()
         self.log_cb("worker started")
         self.log_cb(f"minigame axis: hold_decreases_y={self._mini.hold_decreases_y}")
+        if self._matcher is None:
+            self.log_cb("warning: fish template missing, expected ./img/fish.png")
 
     def stop(self) -> None:
         self._stop_evt.set()
@@ -164,6 +206,11 @@ class AutoFishWorker:
             t0 = time.time()
             cap = self.capture.grab()
             frame, frame_origin = self._normalize_capture_result(cap)
+            if frame is not None:
+                try:
+                    self.screen_height = int(frame.shape[0])
+                except Exception:
+                    pass
             now = time.time()
             infer_interval = 1.0 / max(1, self.cfg.infer_fps)
             if now - self._last_infer_ts >= infer_interval:
@@ -196,7 +243,7 @@ class AutoFishWorker:
                 }
                 for b in annotated_boxes
             ]
-            selected_bar = self._select_bar_bbox(annotated_boxes)
+            selected_bar = self._select_bar_bbox(annotated_boxes, now_ms=now_ms)
             fish_y, zone_y, zone_top, zone_bottom = self._analyze_minigame_roi(frame, selected_bar, now_ms)
             fish_y, zone_y, zone_top, zone_bottom = self._stabilize_measurements(fish_y, zone_y, zone_top, zone_bottom)
             det["bar_bbox"] = selected_bar
@@ -210,21 +257,8 @@ class AutoFishWorker:
             if det.get("has_bar"):
                 self._bar_hits += 1
             if self._tick_count % max(1, self.cfg.loop_fps * 2) == 0:
-                if frame is None:
-                    self.log_cb("diag: capture frame is None")
-                else:
-                    self.log_cb(
-                        f"diag: has_bite={bool(det.get('has_bite'))}, "
-                        f"has_bar={bool(det.get('has_bar'))}, fish_y={det.get('fish_y')}, zone_y={det.get('zone_y')}, "
-                        f"origin={frame_origin}"
-                    )
-                    self.log_cb(f"diag: mini score={self._mini_score:.3f}, template={self._mini_template}")
-                    self.log_cb(
-                        f"diag: yolo_hits_2s bite={self._bite_hits}, bar={self._bar_hits}, "
-                        f"conf0={self.cfg.conf_yolo0:.2f}, conf1={self.cfg.conf_yolo1:.2f}, imgsz={self.cfg.imgsz}"
-                    )
-                    self._bite_hits = 0
-                    self._bar_hits = 0
+                self._bite_hits = 0
+                self._bar_hits = 0
             out = self._sm.tick(now_ms=now_ms, has_bite=bool(det.get("has_bite")), has_bar=bool(det.get("has_bar")))
             self._handle_state_transition(now_ms=now_ms)
             self.status_cb(self._sm.state.value)
@@ -236,10 +270,28 @@ class AutoFishWorker:
                 self._await_next_yolo1 = False
                 self._roi_anchor_bbox = None
                 self._roi_anchor_last_seen_ms = 0
+                self._roi_lock_candidate_bbox = None
+                self._roi_lock_candidate_ms = 0
                 self._smooth_values.clear()
                 for hist in self._signal_hist.values():
                     hist.clear()
+                self._roi_prev_gray = None
+                self._fish_prev_gray = None
+                self._roi_motion_dx = 0.0
+                self._roi_motion_dy = 0.0
+                self._roi_stab_dx = 0.0
+                self._roi_stab_dy = 0.0
                 self._last_mini_signal_ms = 0
+                self._mini_last_ctrl_ms = 0
+                self._mini_last_fish_y = None
+                self._mini_fish_vel_ema = 0.0
+                self._mini_err_prev = None
+                self._mini_mode = "idle"
+                self._mini_brake_until_ms = 0
+                self._mini_hold_last_ms = 0
+                self._mini_hold_active = False
+                self._mini_hold_until_ms = 0
+                self._mini_release_until_ms = 0
                 self._left_hold_active = False
                 self._left_hold_since_ms = 0
                 self._hold_cooldown_until_ms = 0
@@ -274,25 +326,28 @@ class AutoFishWorker:
                 ready = self._update_minigame_ready(zone_y=None if zone_y is None else float(zone_y), now_ms=now_ms)
                 if not ready:
                     self._apply_left_hold(False, now_ms=now_ms)
-                    self._reset_relative_tap()
-                    self._reset_bottom_rescue()
+                    self._mini_mode = "warmup"
+                    self._mini_hold_active = False
                     self._last_hold_action = None
                 elif fish_y is not None and zone_y is not None:
-                    self._reset_bottom_rescue()
+                    zone_y_adj, fish_y_adj = self._update_zone_y(float(zone_y), float(fish_y))
+                    det["zone_y"] = zone_y_adj
+                    det["fish_y"] = fish_y_adj
                     self._last_mini_signal_ms = now_ms
-                    rel_y = float(fish_y) - float(zone_y)
-                    det["rel_y"] = rel_y
-                    self._apply_relative_tap(rel_y=rel_y, now_ms=now_ms)
+                    self._run_minigame_controller(
+                        fish_y=float(fish_y_adj),
+                        zone_y=float(zone_y_adj),
+                        zone_top=None if det.get("zone_top") is None else float(det.get("zone_top")),
+                        zone_bottom=None if det.get("zone_bottom") is None else float(det.get("zone_bottom")),
+                        bar_bbox=det.get("bar_bbox"),
+                        now_ms=now_ms,
+                    )
                     self._last_hold_action = HoldAction.HOLD if self._left_hold_active else HoldAction.RELEASE
                 elif now_ms - self._last_mini_signal_ms >= self._mini_signal_timeout_ms:
-                    if self._zone_near_bottom(det.get("zone_bottom"), det.get("bar_bbox")):
-                        self._apply_bottom_rescue(now_ms=now_ms)
-                        self._last_hold_action = HoldAction.HOLD if self._bottom_rescue_active else HoldAction.RELEASE
-                    else:
-                        self._apply_left_hold(False, now_ms=now_ms)
-                        self._reset_bottom_rescue()
-                        self._last_hold_action = None
-                    self._reset_relative_tap()
+                    self._apply_left_hold(False, now_ms=now_ms)
+                    self._mini_mode = "signal_lost"
+                    self._mini_hold_active = False
+                    self._last_hold_action = None
 
             yolo_preview, roi_preview = self._build_previews(frame, det)
             self.preview_cb(yolo_preview, roi_preview)
@@ -335,82 +390,99 @@ class AutoFishWorker:
             y1 = max(0, min(y1, h - 1))
             y2 = max(0, min(y2, h))
             if x2 > x1 and y2 > y1:
-                roi = frame[y1:y2, x1:x2].copy()
+                roi_strip = frame[y1:y2, x1:x2].copy()
                 fish_y = det.get("fish_y")
                 zone_y = det.get("zone_y")
                 if fish_y is not None:
                     fy = int(float(fish_y) - y1)
-                    cv2.line(roi, (0, fy), (roi.shape[1] - 1, fy), (0, 0, 255), 2)
+                    cv2.line(roi_strip, (0, fy), (roi_strip.shape[1] - 1, fy), (0, 0, 255), 2)
                 if zone_y is not None:
                     zy = int(float(zone_y) - y1)
-                    cv2.line(roi, (0, zy), (roi.shape[1] - 1, zy), (255, 255, 255), 2)
+                    cv2.line(roi_strip, (0, zy), (roi_strip.shape[1] - 1, zy), (255, 255, 255), 2)
                 zone_top = det.get("zone_top")
                 if zone_top is not None:
                     zt = int(float(zone_top) - y1)
-                    cv2.line(roi, (0, zt), (roi.shape[1] - 1, zt), (255, 220, 80), 1)
+                    cv2.line(roi_strip, (0, zt), (roi_strip.shape[1] - 1, zt), (255, 220, 80), 1)
                 zone_bottom = det.get("zone_bottom")
                 if zone_bottom is not None:
                     zb = int(float(zone_bottom) - y1)
-                    cv2.line(roi, (0, zb), (roi.shape[1] - 1, zb), (255, 220, 80), 1)
+                    cv2.line(roi_strip, (0, zb), (roi_strip.shape[1] - 1, zb), (255, 220, 80), 1)
+
+                panel_w = 280
+                panel_h = max(int(roi_strip.shape[0]), 220)
+                roi = np.full((panel_h, int(roi_strip.shape[1]) + panel_w, 3), 255, dtype=np.uint8)
+                roi[0 : roi_strip.shape[0], 0 : roi_strip.shape[1]] = roi_strip
+                cv2.line(roi, (roi_strip.shape[1], 0), (roi_strip.shape[1], panel_h - 1), (220, 220, 220), 1)
+
+                action_text = self._last_hold_action.value.upper() if self._last_hold_action is not None else "NONE"
+                action_color = (0, 220, 0) if action_text == "HOLD" else (0, 120, 255) if action_text == "RELEASE" else (200, 200, 200)
+                text_x = int(roi_strip.shape[1]) + 10
+                text_y = 24
+                line_h = 24
                 cv2.putText(
                     roi,
                     f"score:{self._mini_score:.2f} {self._mini_template}",
-                    (4, 18),
+                    (text_x, text_y),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (255, 220, 0),
+                    0.52,
+                    (10, 90, 190),
                     1,
                 )
-                action_text = self._last_hold_action.value.upper() if self._last_hold_action is not None else "NONE"
-                action_color = (0, 220, 0) if action_text == "HOLD" else (0, 120, 255) if action_text == "RELEASE" else (200, 200, 200)
-                cv2.putText(
-                    roi,
-                    f"action:{action_text}",
-                    (4, 38),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55,
-                    action_color,
-                    2,
-                )
+                text_y += line_h
+                cv2.putText(roi, f"action:{action_text}", (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, action_color, 2)
+                text_y += line_h
                 cv2.putText(
                     roi,
                     f"ctl:{self._mini.last_control:+.1f}",
-                    (4, 58),
+                    (text_x, text_y),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (120, 220, 255),
+                    0.54,
+                    (140, 100, 0),
                     1,
                 )
                 rel_y = det.get("rel_y")
                 if rel_y is not None:
+                    text_y += line_h
                     cv2.putText(
                         roi,
                         f"rel_y:{float(rel_y):+.1f}",
-                        (4, 76),
+                        (text_x, text_y),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (120, 255, 200),
+                        0.54,
+                        (0, 120, 60),
                         1,
                     )
+                text_y += line_h
                 cv2.putText(
                     roi,
-                    f"mode:{self._mini.last_mode}",
-                    (4, 94),
+                    f"mode:{self._mini_mode}",
+                    (text_x, text_y),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    (120, 255, 160),
+                    0.54,
+                    (40, 120, 40),
                     1,
                 )
                 if self._sm.state == AutoFishState.MINIGAME and not self._mini_ready:
+                    text_y += line_h
                     cv2.putText(
                         roi,
                         "ready:WAIT_DROP",
-                        (4, 112),
+                        (text_x, text_y),
                         cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (80, 200, 255),
+                        0.54,
+                        (0, 100, 180),
                         1,
                     )
+                text_y += line_h
+                cv2.putText(
+                    roi,
+                    f"stab:dx={self._roi_stab_dx:+.1f} dy={self._roi_stab_dy:+.1f}",
+                    (text_x, min(panel_h - 8, text_y)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.50,
+                    (90, 90, 90),
+                    1,
+                )
         return yolo, roi
 
     @staticmethod
@@ -438,18 +510,30 @@ class AutoFishWorker:
             out.append(bb)
         return out
 
-    def _select_bar_bbox(self, boxes):
+    def _select_bar_bbox(self, boxes, now_ms: int | None = None):
+        if now_ms is None:
+            now_ms = int(time.time() * 1000)
         # class-1 before hook click should not be used as ROI.
         class1 = [b for b in boxes if int(b.get("cls", -1)) == 1]
         if self._sm.state == AutoFishState.WAIT_BITE:
-            if self._await_next_yolo1 and class1:
-                now_ms = int(time.time() * 1000)
-                self._update_roi_anchor(class1[0]["bbox"], now_ms=now_ms)
+            if self._await_next_yolo1:
+                if class1:
+                    cand = max(class1, key=lambda b: float(b.get("conf", 0.0)))
+                    if self._roi_lock_candidate_bbox is None:
+                        self._roi_lock_candidate_bbox = cand["bbox"]
+                        self._roi_lock_candidate_ms = now_ms
+                    else:
+                        self._roi_lock_candidate_bbox = cand["bbox"]
+                if self._roi_lock_candidate_bbox is None:
+                    return None
+                if now_ms - self._roi_lock_candidate_ms < self._roi_lock_delay_ms:
+                    return None
+                self._update_roi_anchor(self._roi_lock_candidate_bbox, now_ms=now_ms)
+                self._roi_lock_candidate_bbox = None
                 self._await_next_yolo1 = False
                 return self._roi_anchor_bbox
             return None
         if self._sm.state == AutoFishState.MINIGAME:
-            now_ms = int(time.time() * 1000)
             if not class1:
                 # Keep using locked ROI for a while when yolo:1 flickers.
                 if self._roi_anchor_bbox is not None and now_ms - self._roi_anchor_last_seen_ms <= 1500:
@@ -503,7 +587,14 @@ class AutoFishWorker:
     def _analyze_minigame_roi(self, frame, bar_bbox, now_ms: int):
         self._mini_score = 0.0
         self._mini_template = ""
+        self._mini_scale = None
         if frame is None or bar_bbox is None:
+            self._roi_prev_gray = None
+            self._fish_prev_gray = None
+            self._roi_motion_dx = 0.0
+            self._roi_motion_dy = 0.0
+            self._roi_stab_dx = 0.0
+            self._roi_stab_dy = 0.0
             return None, None, None, None
         x1, y1, x2, y2 = bar_bbox
         h, w = frame.shape[:2]
@@ -513,32 +604,79 @@ class AutoFishWorker:
         y2 = max(0, min(y2, h))
         if x2 <= x1 or y2 <= y1:
             return None, None, None, None
-        roi = frame[y1:y2, x1:x2]
-        if self._matcher is None:
-            return None, None, None, None
+        roi_raw = frame[y1:y2, x1:x2]
+        roi, stab_dx, stab_dy = self._stabilize_roi_image(roi_raw)
+        self._roi_stab_dx = stab_dx
+        self._roi_stab_dy = stab_dy
         band = detect_white_zone_band(roi)
-        hit = self._matcher.locate(roi, now_ms=now_ms)
+        hit = self._matcher.locate(roi, now_ms=now_ms) if self._matcher is not None else None
         fish_y = None
         if hit is not None:
-            fish_y = y1 + hit.fish_y
+            fish_y = y1 + hit.fish_y + stab_dy
             self._mini_score = hit.score
             self._mini_template = hit.template_name
+            self._mini_scale = float(hit.scale)
+            # Keep motion reference updated even when template hits.
+            self._fish_prev_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         else:
-            # Fallback: detect darkest connected blob center, less noisy than min-pixel.
-            prefer_local_y = None
-            if band is not None:
-                prefer_local_y = float(band.center)
-            fb_y = detect_dark_blob_center(roi, prefer_y=prefer_local_y)
-            if fb_y is not None:
-                fish_y = y1 + float(fb_y)
-                self._mini_score = 0.0
-                self._mini_template = "fallback-dark"
+            # Non-template fish detection (no fallback-dark).
+            # Priority: width-peak -> color-peak -> motion-peak.
+            # Motion needs previous stable ROI gray frame.
+            diff = None
+            gray_u8 = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            if self._fish_prev_gray is not None and self._fish_prev_gray.shape == gray_u8.shape:
+                diff = cv2.absdiff(gray_u8, self._fish_prev_gray)
+            self._fish_prev_gray = gray_u8
+
+            cand = detect_fish_by_width_peak(roi, band)
+            if cand is None:
+                cand = detect_fish_by_color_peak(roi, band)
+            if cand is None:
+                cand = detect_fish_by_motion_peak(roi, band, diff)
+
+            if cand is not None:
+                fish_y = y1 + float(cand.fish_y) + stab_dy
+                self._mini_score = float(cand.score)
+                self._mini_template = cand.method
+                self._mini_scale = None
         if band is None:
             return fish_y, None, None, None
-        zone_y = y1 + band.center
-        zone_top = y1 + float(band.top)
-        zone_bottom = y1 + float(band.bottom)
+        zone_y = y1 + band.center + stab_dy
+        zone_top = y1 + float(band.top) + stab_dy
+        zone_bottom = y1 + float(band.bottom) + stab_dy
         return fish_y, zone_y, zone_top, zone_bottom
+
+    def _stabilize_roi_image(self, roi_bgr):
+        if roi_bgr is None or roi_bgr.size == 0:
+            self._roi_prev_gray = None
+            self._fish_prev_gray = None
+            self._roi_motion_dx = 0.0
+            self._roi_motion_dy = 0.0
+            return roi_bgr, 0.0, 0.0
+        gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        if self._roi_prev_gray is None or self._roi_prev_gray.shape != gray.shape:
+            self._roi_prev_gray = gray
+            self._roi_motion_dx = 0.0
+            self._roi_motion_dy = 0.0
+            return roi_bgr, 0.0, 0.0
+        (dx, dy), resp = cv2.phaseCorrelate(self._roi_prev_gray, gray)
+        self._roi_prev_gray = gray
+        if resp is None or float(resp) < self._roi_motion_min_resp:
+            dx, dy = 0.0, 0.0
+        dx = float(max(-self._roi_motion_max_px, min(self._roi_motion_max_px, dx)))
+        dy = float(max(-self._roi_motion_max_px, min(self._roi_motion_max_px, dy)))
+        a = self._roi_motion_alpha
+        self._roi_motion_dx = self._roi_motion_dx * (1.0 - a) + dx * a
+        self._roi_motion_dy = self._roi_motion_dy * (1.0 - a) + dy * a
+        m = np.float32([[1.0, 0.0, -self._roi_motion_dx], [0.0, 1.0, -self._roi_motion_dy]])
+        stable = cv2.warpAffine(
+            roi_bgr,
+            m,
+            (roi_bgr.shape[1], roi_bgr.shape[0]),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+        return stable, self._roi_motion_dx, self._roi_motion_dy
 
     def _handle_state_transition(self, now_ms: int) -> None:
         if self._sm.state == self._last_sm_state:
@@ -554,6 +692,16 @@ class AutoFishWorker:
             self._mini_ready = False
             self._mini_prev_zone_y = None
             self._mini_drop_start_y = None
+            self._mini_last_ctrl_ms = 0
+            self._mini_last_fish_y = None
+            self._mini_fish_vel_ema = 0.0
+            self._mini_err_prev = None
+            self._mini_mode = "idle"
+            self._mini_brake_until_ms = 0
+            self._mini_hold_last_ms = 0
+            self._mini_hold_active = False
+            self._mini_hold_until_ms = 0
+            self._mini_release_until_ms = 0
             self._apply_left_hold(False, now_ms=now_ms)
             self._reset_relative_tap()
             self._reset_bottom_rescue()
@@ -580,6 +728,179 @@ class AutoFishWorker:
             return True
         return False
 
+    def _update_zone_y(self, zone_y: float | None, fish_y: float | None):
+        """Update zone/fish y and prevent bottom-stuck tracking."""
+        bottom = float(max(0.0, float(self.screen_height) - self._screen_bottom_margin_px))
+        if zone_y is None:
+            z = None
+        else:
+            z = float(zone_y)
+            if z > bottom:
+                z = bottom
+            z = min(z, bottom)
+
+        if fish_y is None:
+            f = None
+        else:
+            f = float(fish_y)
+            if z is not None and z >= bottom:
+                f = bottom
+            if f > bottom:
+                f = bottom
+        return z, f
+
+    def minigame_hold(
+        self,
+        ms: int,
+        score: float,
+        template: str,
+        scale,
+        fish_y: float | None,
+        zone_y: float | None,
+    ) -> None:
+        zone_y, fish_y = self._update_zone_y(zone_y, fish_y)
+        scale_text = "None" if scale is None else f"{float(scale):.2f}"
+        fish_text = "None" if fish_y is None else f"{float(fish_y):.1f}"
+        zone_text = "None" if zone_y is None else f"{float(zone_y):.1f}"
+        self.log_cb(
+            f"minigame_hold ms={int(ms)} score={float(score):.3f} "
+            f"template={template} scale={scale_text} fish_y={fish_text} zone_y={zone_text}"
+        )
+
+    @staticmethod
+    def _calc_hold_ms_from_error(
+        abs_err_px: float,
+        track_px: float,
+        up_full_ms: float = 700.0,
+        hold_min_ms: int = 150,
+        hold_max_ms: int = 350,
+    ) -> int:
+        tpx = max(1.0, float(track_px))
+        lo = float(min(hold_min_ms, hold_max_ms))
+        hi = float(max(hold_min_ms, hold_max_ms))
+        ms = lo + (float(up_full_ms) * max(0.0, float(abs_err_px)) / tpx)
+        return int(max(lo, min(hi, round(ms))))
+
+    def _run_minigame_controller(
+        self,
+        fish_y: float,
+        zone_y: float,
+        zone_top: float | None,
+        zone_bottom: float | None,
+        bar_bbox,
+        now_ms: int,
+    ) -> None:
+        dt = max(1.0, float(now_ms - self._mini_last_ctrl_ms)) if self._mini_last_ctrl_ms > 0 else 16.0
+        if self._mini_last_fish_y is not None:
+            inst_v = (fish_y - self._mini_last_fish_y) / dt
+            self._mini_fish_vel_ema = self._mini_fish_vel_ema * (1.0 - self._mini_vel_alpha) + inst_v * self._mini_vel_alpha
+        self._mini_last_fish_y = fish_y
+        self._mini_last_ctrl_ms = now_ms
+        # Adaptive prediction: reduce lead when close to target to avoid overshoot.
+        err_raw = fish_y - zone_y
+        close_k = max(0.15, min(1.0, abs(err_raw) / max(1.0, float(self._mini_far_px))))
+        eff_predict_ms = float(self._mini_predict_ms) * close_k
+        pred_off = self._mini_fish_vel_ema * eff_predict_ms
+        pred_cap = max(3.0, self._mini_far_px * 0.45)
+        pred_off = max(-pred_cap, min(pred_cap, pred_off))
+        fish_pred = fish_y + pred_off
+        err = fish_pred - zone_y
+        self._mini.last_control = float(err)
+        self._mini.last_pred_fish_y = float(fish_pred)
+
+        want_hold = False
+        mode = "track"
+        urgent_up = False
+        urgent_down = False
+
+        # Edge guard has highest priority.
+        if zone_top is not None and fish_y - zone_top <= self._mini_edge_guard_px:
+            want_hold = True
+            mode = "edge_up"
+            urgent_up = True
+        elif zone_bottom is not None and zone_bottom - fish_y <= self._mini_edge_guard_px:
+            want_hold = False
+            mode = "edge_down"
+            urgent_down = True
+        else:
+            # Overshoot brake window when sign flips near target.
+            if self._mini_err_prev is not None and (self._mini_err_prev * err < 0.0) and abs(self._mini_err_prev) > self._mini_dead_px:
+                self._mini_brake_until_ms = now_ms + self._mini_brake_ms
+            if now_ms < self._mini_brake_until_ms:
+                want_hold = err < -self._mini_dead_px * 0.4
+                mode = "brake"
+            elif abs(err) >= self._mini_far_px:
+                want_hold = err < 0.0
+                if want_hold:
+                    urgent_up = True
+                else:
+                    urgent_down = True
+                mode = "catchup"
+            elif err < -self._mini_dead_px:
+                want_hold = True
+                mode = "track_up"
+            elif err > self._mini_dead_px * 0.65:
+                want_hold = False
+                mode = "track_down"
+            else:
+                want_hold = False
+                mode = "coast"
+        self._mini_err_prev = err
+        self._mini_mode = mode
+
+        # End pulse when time is up.
+        if self._mini_hold_active and now_ms >= self._mini_hold_until_ms:
+            self._apply_left_hold(False, now_ms=now_ms)
+            self._mini_hold_active = False
+            self._mini_release_until_ms = now_ms + self._mini_release_lock_ms
+
+        if self._mini_hold_active:
+            # Early release branch: when direction turns against current pulse.
+            if urgent_down or (mode in {"brake", "track_down"} and err > self._mini_dead_px * 0.2):
+                self._apply_left_hold(False, now_ms=now_ms)
+                self._mini_hold_active = False
+                self._mini_release_until_ms = now_ms + self._mini_release_lock_ms
+            else:
+                return
+
+        if not want_hold:
+            self._apply_left_hold(False, now_ms=now_ms)
+            return
+
+        interval_ms = self._mini_hold_interval_catch_ms if mode == "catchup" else self._mini_hold_interval_track_ms
+        urgent_press = urgent_up or err < -self._mini_far_px * 1.15
+        if not urgent_press and now_ms - self._mini_hold_last_ms < interval_ms:
+            return
+        if not urgent_press and now_ms < self._mini_release_until_ms:
+            return
+
+        track_px = self._mini_track_px_ref
+        if bar_bbox is not None:
+            try:
+                track_px = max(40.0, float(bar_bbox[3] - bar_bbox[1]))
+            except Exception:
+                track_px = self._mini_track_px_ref
+        up_full_ms = self._mini_up_full_ms * (0.90 if mode == "catchup" else 0.75)
+        hold_ms = self._calc_hold_ms_from_error(
+            abs_err_px=abs(err),
+            track_px=track_px,
+            up_full_ms=up_full_ms,
+            hold_min_ms=self._mini_hold_min_ms,
+            hold_max_ms=self._mini_hold_max_ms,
+        )
+        self._apply_left_hold(True, now_ms=now_ms)
+        self._mini_hold_active = True
+        self._mini_hold_until_ms = now_ms + hold_ms
+        self._mini_hold_last_ms = now_ms
+        self.minigame_hold(
+            ms=hold_ms,
+            score=self._mini_score,
+            template=self._mini_template,
+            scale=self._mini_scale,
+            fish_y=fish_y,
+            zone_y=zone_y,
+        )
+
     def _apply_left_hold(self, want_hold: bool, now_ms: int) -> None:
         if want_hold and now_ms < self._hold_cooldown_until_ms:
             want_hold = False
@@ -598,11 +919,11 @@ class AutoFishWorker:
 
     def _apply_relative_tap(self, rel_y: float, now_ms: int) -> None:
         if rel_y < -self._rel_dead_px:
-            hold_ms = self._tap_hold_ms_light
-            interval_ms = self._tap_interval_ms_light
-        elif rel_y > self._rel_dead_px:
             hold_ms = self._tap_hold_ms_heavy
             interval_ms = self._tap_interval_ms_heavy
+        elif rel_y > self._rel_dead_px:
+            hold_ms = self._tap_hold_ms_light
+            interval_ms = self._tap_interval_ms_light
         else:
             hold_ms = self._tap_hold_ms_mid
             interval_ms = self._tap_interval_ms_mid

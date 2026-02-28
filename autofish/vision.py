@@ -36,6 +36,10 @@ class YoloVision:
             conf = float(box.conf.item())
             xyxy = box.xyxy[0].tolist()
             x1, y1, x2, y2 = map(int, xyxy)
+            if cls_id == 0 and conf < self.conf_yolo0:
+                continue
+            if cls_id == 1 and conf < self.conf_yolo1:
+                continue
             boxes.append({"cls": cls_id, "conf": conf, "bbox": (x1, y1, x2, y2)})
             if cls_id == 0 and conf >= self.conf_yolo0:
                 has_bite = True

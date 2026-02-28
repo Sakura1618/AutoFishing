@@ -23,6 +23,7 @@ class TrackMode(str, Enum):
 class MatchHit:
     fish_y: float
     score: float
+    scale: float
     bbox: tuple[int, int, int, int]
     template_name: str
 
@@ -309,6 +310,7 @@ class FishTemplateMatcher:
                 hit = MatchHit(
                     fish_y=float(y + y_off + th / 2.0),
                     score=float(max_val),
+                    scale=float(s),
                     bbox=(x + x_off, y + y_off, x + x_off + tw, y + y_off + th),
                     template_name=pack.name,
                 )
@@ -323,7 +325,13 @@ class FishTemplateMatcher:
         py = prev.fish_y
         cy = cur.fish_y
         sy = py * (1.0 - a) + cy * a
-        return MatchHit(fish_y=float(sy), score=cur.score, bbox=cur.bbox, template_name=cur.template_name)
+        return MatchHit(
+            fish_y=float(sy),
+            score=cur.score,
+            scale=cur.scale,
+            bbox=cur.bbox,
+            template_name=cur.template_name,
+        )
 
     def _hold_last(self, now_ms: int) -> MatchHit | None:
         if self._last_hit is None:
@@ -341,17 +349,27 @@ def estimate_white_zone_center(roi_bgr: np.ndarray) -> float | None:
 def detect_white_zone_band(roi_bgr: np.ndarray) -> WhiteZoneBand | None:
     if roi_bgr is None or roi_bgr.size == 0:
         return None
-    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
-    _, mask = cv2.threshold(gray, 205, 255, cv2.THRESH_BINARY)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((2, 2), dtype=np.uint8))
-    h, w = mask.shape[:2]
+    h, w = roi_bgr.shape[:2]
     if h < 5 or w < 5:
         return None
-    row_ratio = (mask > 0).mean(axis=1)
-    rows = np.where(row_ratio >= 0.18)[0]
-    if rows.size == 0:
+
+    hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+    # White area: low saturation + high value.
+    raw_white_mask = cv2.inRange(hsv, (0, 0, 180), (179, 80, 255))
+    white_mask = raw_white_mask.copy()
+    # Bridge fish occlusion that splits white area into two pieces.
+    k_h = max(9, int(round(h * 0.14)))
+    # Keep close-kernel conservative to avoid zone jitter.
+    k_h = min(19, k_h)
+    k_h = min(h - 1 if (h % 2 == 0) else h, k_h)
+    white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, np.ones((k_h, 5), dtype=np.uint8))
+    white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, np.ones((3, 2), dtype=np.uint8))
+    row_white_ratio = (white_mask > 0).mean(axis=1)
+    rows = np.where(row_white_ratio >= 0.20)[0]
+    if rows.size < 3:
         return None
-    runs: list[tuple[int, int]] = []
+
+    runs: list[tuple[int, int, float]] = []
     start = int(rows[0])
     prev = int(rows[0])
     for y in rows[1:]:
@@ -359,18 +377,70 @@ def detect_white_zone_band(roi_bgr: np.ndarray) -> WhiteZoneBand | None:
         if y == prev + 1:
             prev = y
             continue
-        runs.append((start, prev))
+        if prev - start + 1 >= 3:
+            s = float(row_white_ratio[start : prev + 1].mean())
+            runs.append((start, prev, s))
         start = y
         prev = y
-    runs.append((start, prev))
-    top, bottom = max(runs, key=lambda r: (r[1] - r[0] + 1))
+    if prev - start + 1 >= 3:
+        s = float(row_white_ratio[start : prev + 1].mean())
+        runs.append((start, prev, s))
+    if not runs:
+        return None
+
+    top, bottom, _ = max(runs, key=lambda r: ((r[1] - r[0] + 1), r[2]))
     if bottom - top + 1 < 3:
         return None
-    strength = float(row_ratio[top : bottom + 1].mean())
+    raw_row_ratio = (raw_white_mask > 0).mean(axis=1)
+    for y in range(int(top), int(bottom) + 1):
+        if raw_row_ratio[y] >= 0.22:
+            top = int(y)
+            break
+    for y in range(int(bottom), int(top) - 1, -1):
+        if raw_row_ratio[y] >= 0.22:
+            bottom = int(y)
+            break
+
+    # Green/cyan border refinement near white area boundaries.
+    # Restrict to white columns to avoid green background interference.
+    col_ratio = (white_mask > 0).mean(axis=0)
+    cols = np.where(col_ratio >= 0.15)[0]
+    if cols.size > 0:
+        c1 = max(0, int(cols[0]) - 2)
+        c2 = min(w, int(cols[-1]) + 3)
+    else:
+        c1, c2 = 0, w
+    green1 = cv2.inRange(hsv, (35, 40, 70), (95, 255, 255))
+    green2 = cv2.inRange(hsv, (80, 35, 70), (120, 255, 255))
+    green_mask = cv2.bitwise_or(green1, green2)
+    row_green_ratio = (green_mask[:, c1:c2] > 0).mean(axis=1)
+    search = max(3, int(round(h * 0.08)))
+    t1 = max(0, int(top) - search)
+    t2 = min(h - 1, int(top) + search)
+    b1 = max(0, int(bottom) - search)
+    b2 = min(h - 1, int(bottom) + search)
+    top_band = row_green_ratio[t1 : t2 + 1]
+    bot_band = row_green_ratio[b1 : b2 + 1]
+    if top_band.size > 0 and float(np.max(top_band)) >= 0.08:
+        cand_top = int(t1 + int(np.argmax(top_band)) + 1)
+        if cand_top >= top - 2:
+            top = cand_top
+    if bot_band.size > 0 and float(np.max(bot_band)) >= 0.08:
+        cand_bottom = int(b1 + int(np.argmax(bot_band)) - 1)
+        if cand_bottom <= bottom + 2:
+            bottom = cand_bottom
+    top = max(0, min(top, h - 2))
+    bottom = max(top + 1, min(bottom, h - 1))
+    strength = float(row_white_ratio[max(0, top) : min(h, bottom + 1)].mean())
     return WhiteZoneBand(top=top, bottom=bottom, center=(top + bottom) / 2.0, strength=strength)
 
 
-def detect_dark_blob_center(roi_bgr: np.ndarray, prefer_y: float | None = None) -> float | None:
+def detect_dark_blob_center(
+    roi_bgr: np.ndarray,
+    prefer_y: float | None = None,
+    band_top: float | None = None,
+    band_bottom: float | None = None,
+) -> float | None:
     if roi_bgr is None or roi_bgr.size == 0:
         return None
     gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
@@ -395,6 +465,17 @@ def detect_dark_blob_center(roi_bgr: np.ndarray, prefer_y: float | None = None) 
         y = int(stats[i, cv2.CC_STAT_TOP])
         ww = int(stats[i, cv2.CC_STAT_WIDTH])
         hh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        if ww < 4 or hh < 4:
+            continue
+        if ww > int(w * 0.9) or hh > int(h * 0.9):
+            continue
+        aspect = float(ww) / float(max(1, hh))
+        if aspect < 0.30 or aspect > 3.5:
+            continue
+        if band_top is not None and cy < float(band_top):
+            continue
+        if band_bottom is not None and cy > float(band_bottom):
+            continue
         patch = blur[y : y + hh, x : x + ww]
         darkness = 255.0 - float(np.mean(patch))
         center_bonus = -abs(cx - (w * 0.5)) * 0.15
@@ -406,6 +487,199 @@ def detect_dark_blob_center(roi_bgr: np.ndarray, prefer_y: float | None = None) 
     if best_idx <= 0:
         return None
     return float(cent[best_idx, 1])
+
+
+
+
+# -----------------------------
+# Fish detection (non-template)
+# -----------------------------
+
+@dataclass(slots=True)
+class FishDetectHit:
+    fish_y: float
+    score: float
+    method: str
+
+
+def _estimate_bar_window_from_white(roi_bgr: np.ndarray) -> tuple[int, int, int, np.ndarray, np.ndarray] | None:
+    """Estimate the vertical bar (white strip) column window.
+
+    Returns (x1, x2, bar_width, hsv, white_mask) where [x1,x2) is a tight
+    window around the white strip used for row-wise statistics.
+    """
+    if roi_bgr is None or roi_bgr.size == 0:
+        return None
+    h, w = roi_bgr.shape[:2]
+    if h < 5 or w < 5:
+        return None
+    hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+
+    raw_white_mask = cv2.inRange(hsv, (0, 0, 180), (179, 80, 255))
+    white_mask = raw_white_mask.copy()
+    # Conservative bridging (same spirit as detect_white_zone_band)
+    k_h = max(9, int(round(h * 0.14)))
+    k_h = min(19, k_h)
+    k_h = min(h - 1 if (h % 2 == 0) else h, k_h)
+    white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, np.ones((k_h, 5), dtype=np.uint8))
+    white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, np.ones((3, 2), dtype=np.uint8))
+
+    col_ratio = (white_mask > 0).mean(axis=0)
+    cols = np.where(col_ratio >= 0.15)[0]
+    if cols.size < 3:
+        return None
+    left = int(cols[0])
+    right = int(cols[-1])
+    bar_w = max(3, right - left + 1)
+    cx = int(round((left + right) * 0.5))
+
+    # Expand around strip a bit to include fish protrusion (fish typically extends outside the strip)
+    half = int(round(bar_w * 1.25))
+    x1 = max(0, cx - half)
+    x2 = min(w, cx + half + 1)
+    if x2 - x1 < 6:
+        return None
+    return x1, x2, bar_w, hsv, white_mask
+
+
+def detect_fish_by_width_peak(roi_bgr: np.ndarray, band: WhiteZoneBand | None) -> FishDetectHit | None:
+    """Detect fish by looking for the row where the non-background span becomes widest."""
+    est = _estimate_bar_window_from_white(roi_bgr)
+    if est is None:
+        return None
+    x1, x2, bar_w, hsv, _white_mask = est
+    h, w = roi_bgr.shape[:2]
+
+    # Background (green/cyan water). Foreground is everything else.
+    green1 = cv2.inRange(hsv, (35, 40, 60), (95, 255, 255))
+    green2 = cv2.inRange(hsv, (80, 35, 60), (120, 255, 255))
+    bg = cv2.bitwise_or(green1, green2) > 0
+    fg = ~bg
+
+    if band is not None:
+        pad = max(6, int(round((band.bottom - band.top) * 0.40)))
+        y_lo = max(0, int(band.top) - pad)
+        y_hi = min(h - 1, int(band.bottom) + pad)
+    else:
+        y_lo, y_hi = 0, h - 1
+
+    widths = []
+    for y in range(y_lo, y_hi + 1):
+        row = fg[y, x1:x2]
+        xs = np.where(row)[0]
+        if xs.size < 2:
+            widths.append(0.0)
+            continue
+        widths.append(float(int(xs[-1]) - int(xs[0]) + 1))
+    if len(widths) < 5:
+        return None
+    widths_np = np.array(widths, dtype=np.float32)
+
+    # Baseline width: median (mostly just the white strip)
+    baseline = float(np.median(widths_np))
+    # Peak: where fish protrudes (wider than baseline)
+    peak_idx = int(np.argmax(widths_np))
+    peak_w = float(widths_np[peak_idx])
+    delta = peak_w - baseline
+
+    # Require a meaningful width bump.
+    min_delta = max(2.0, float(bar_w) * 0.10)
+    if delta < min_delta:
+        return None
+
+    fish_y = float(y_lo + peak_idx)
+    # Score in pixels of width increase.
+    return FishDetectHit(fish_y=fish_y, score=float(delta), method="width-peak")
+
+
+def detect_fish_by_color_peak(roi_bgr: np.ndarray, band: WhiteZoneBand | None) -> FishDetectHit | None:
+    """Detect fish by saturation spike on the white strip window (fish is colorful; strip is low-sat)."""
+    est = _estimate_bar_window_from_white(roi_bgr)
+    if est is None:
+        return None
+    x1, x2, _bar_w, hsv, _white_mask = est
+    h, _w = roi_bgr.shape[:2]
+
+    # Restrict analysis to the strip window, and ignore background green/cyan pixels.
+    green1 = cv2.inRange(hsv, (35, 40, 60), (95, 255, 255))
+    green2 = cv2.inRange(hsv, (80, 35, 60), (120, 255, 255))
+    bg = (cv2.bitwise_or(green1, green2) > 0)
+
+    sat = hsv[:, :, 1].astype(np.float32)
+
+    if band is not None:
+        pad = max(6, int(round((band.bottom - band.top) * 0.40)))
+        y_lo = max(0, int(band.top) - pad)
+        y_hi = min(h - 1, int(band.bottom) + pad)
+    else:
+        y_lo, y_hi = 0, h - 1
+
+    scores = []
+    for y in range(y_lo, y_hi + 1):
+        row_sat = sat[y, x1:x2]
+        row_bg = bg[y, x1:x2]
+        # Use non-background pixels only (strip + fish).
+        vals = row_sat[~row_bg]
+        if vals.size < 4:
+            scores.append(0.0)
+            continue
+        scores.append(float(np.mean(vals)))
+    if len(scores) < 5:
+        return None
+    s = np.array(scores, dtype=np.float32)
+
+    baseline = float(np.median(s))
+    peak_idx = int(np.argmax(s))
+    peak_val = float(s[peak_idx])
+    delta = peak_val - baseline
+
+    # Saturation delta threshold: modest, because the strip is near 0 while fish is much higher.
+    if delta < 12.0:
+        return None
+
+    fish_y = float(y_lo + peak_idx)
+    return FishDetectHit(fish_y=fish_y, score=float(delta), method="color-peak")
+
+
+def detect_fish_by_motion_peak(
+    roi_bgr: np.ndarray,
+    band: WhiteZoneBand | None,
+    diff_gray: np.ndarray | None,
+) -> FishDetectHit | None:
+    """Detect fish by per-row motion energy peak (needs a precomputed gray absdiff)."""
+    if diff_gray is None or diff_gray.size == 0:
+        return None
+    est = _estimate_bar_window_from_white(roi_bgr)
+    if est is None:
+        return None
+    x1, x2, _bar_w, _hsv, _white_mask = est
+    h, _w = diff_gray.shape[:2]
+
+    if band is not None:
+        pad = max(6, int(round((band.bottom - band.top) * 0.55)))
+        y_lo = max(0, int(band.top) - pad)
+        y_hi = min(h - 1, int(band.bottom) + pad)
+    else:
+        y_lo, y_hi = 0, h - 1
+
+    # Light denoise for stability.
+    diff = cv2.GaussianBlur(diff_gray, (3, 3), 0).astype(np.float32)
+
+    scores = []
+    for y in range(y_lo, y_hi + 1):
+        scores.append(float(np.mean(diff[y, x1:x2])))
+    if len(scores) < 5:
+        return None
+    s = np.array(scores, dtype=np.float32)
+    baseline = float(np.median(s))
+    peak_idx = int(np.argmax(s))
+    peak_val = float(s[peak_idx])
+    delta = peak_val - baseline
+
+    if delta < 6.0:
+        return None
+    fish_y = float(y_lo + peak_idx)
+    return FishDetectHit(fish_y=fish_y, score=float(delta), method="motion-peak")
 
 
 def _resize_edge(edge: np.ndarray, scale: float) -> np.ndarray:

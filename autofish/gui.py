@@ -41,6 +41,22 @@ class AutoFishApp(tk.Tk):
         self._infer_fps_var = tk.StringVar(value="60")
         self._loop_fps_var = tk.StringVar(value="60")
         self._imgsz_var = tk.StringVar(value="640")
+        self._mini_dead_px_var = tk.StringVar(value="3.0")
+        self._mini_far_px_var = tk.StringVar(value="22.0")
+        self._mini_predict_ms_var = tk.StringVar(value="100")
+        self._mini_vel_alpha_var = tk.StringVar(value="0.35")
+        self._mini_edge_guard_px_var = tk.StringVar(value="2.5")
+        self._mini_brake_ms_var = tk.StringVar(value="90")
+        self._mini_hold_track_ms_var = tk.StringVar(value="120")
+        self._mini_hold_catch_ms_var = tk.StringVar(value="70")
+        self._mini_track_px_ref_var = tk.StringVar(value="90")
+        self._mini_up_full_ms_var = tk.StringVar(value="700")
+        self._mini_hold_min_ms_var = tk.StringVar(value="150")
+        self._mini_hold_max_ms_var = tk.StringVar(value="260")
+        self._mini_drop_need_px_var = tk.StringVar(value="3.0")
+        self._mini_wait_max_ms_var = tk.StringVar(value="1200")
+        self._mini_signal_timeout_ms_var = tk.StringVar(value="100")
+        self._roi_lock_delay_ms_var = tk.StringVar(value="500")
         self._windows: list[tuple[int, str]] = []
         self._yolo_imgtk = None
         self._roi_imgtk = None
@@ -97,6 +113,32 @@ class AutoFishApp(tk.Tk):
         ttk.Entry(yolo_row, textvariable=self._loop_fps_var, width=6).pack(side=tk.LEFT, padx=(4, 8))
         ttk.Label(yolo_row, text="imgsz").pack(side=tk.LEFT)
         ttk.Entry(yolo_row, textvariable=self._imgsz_var, width=7).pack(side=tk.LEFT, padx=(4, 0))
+
+        mini = ttk.LabelFrame(top, text="MiniGame")
+        mini.grid(row=4, column=1, sticky="ew", padx=8, pady=(8, 0))
+        fields = [
+            ("deadPx", self._mini_dead_px_var),
+            ("farPx", self._mini_far_px_var),
+            ("predictMs", self._mini_predict_ms_var),
+            ("velAlpha", self._mini_vel_alpha_var),
+            ("edgePx", self._mini_edge_guard_px_var),
+            ("brakeMs", self._mini_brake_ms_var),
+            ("intTrack", self._mini_hold_track_ms_var),
+            ("intCatch", self._mini_hold_catch_ms_var),
+            ("trackPx", self._mini_track_px_ref_var),
+            ("upFullMs", self._mini_up_full_ms_var),
+            ("holdMin", self._mini_hold_min_ms_var),
+            ("holdMax", self._mini_hold_max_ms_var),
+            ("dropNeed", self._mini_drop_need_px_var),
+            ("waitMax", self._mini_wait_max_ms_var),
+            ("sigTout", self._mini_signal_timeout_ms_var),
+            ("roiLock", self._roi_lock_delay_ms_var),
+        ]
+        for i, (name, var) in enumerate(fields):
+            r = i // 8
+            c = (i % 8) * 2
+            ttk.Label(mini, text=name).grid(row=r, column=c, sticky="w", padx=(2, 2), pady=2)
+            ttk.Entry(mini, textvariable=var, width=6).grid(row=r, column=c + 1, sticky="w", padx=(0, 6), pady=2)
         top.columnconfigure(1, weight=1)
 
         btns = ttk.Frame(root)
@@ -212,6 +254,22 @@ class AutoFishApp(tk.Tk):
                 infer_fps=int(self._infer_fps_var.get().strip() or "10"),
                 loop_fps=int(self._loop_fps_var.get().strip() or "20"),
                 imgsz=int(self._imgsz_var.get().strip() or "640"),
+                mini_dead_px=float(self._mini_dead_px_var.get().strip() or "3.0"),
+                mini_far_px=float(self._mini_far_px_var.get().strip() or "22.0"),
+                mini_predict_ms=int(self._mini_predict_ms_var.get().strip() or "140"),
+                mini_vel_alpha=float(self._mini_vel_alpha_var.get().strip() or "0.35"),
+                mini_edge_guard_px=float(self._mini_edge_guard_px_var.get().strip() or "2.5"),
+                mini_brake_ms=int(self._mini_brake_ms_var.get().strip() or "140"),
+                mini_hold_interval_track_ms=int(self._mini_hold_track_ms_var.get().strip() or "70"),
+                mini_hold_interval_catch_ms=int(self._mini_hold_catch_ms_var.get().strip() or "45"),
+                mini_track_px_ref=float(self._mini_track_px_ref_var.get().strip() or "90"),
+                mini_up_full_ms=float(self._mini_up_full_ms_var.get().strip() or "700"),
+                mini_hold_min_ms=int(self._mini_hold_min_ms_var.get().strip() or "150"),
+                mini_hold_max_ms=int(self._mini_hold_max_ms_var.get().strip() or "350"),
+                mini_drop_need_px=float(self._mini_drop_need_px_var.get().strip() or "3.0"),
+                mini_wait_max_ms=int(self._mini_wait_max_ms_var.get().strip() or "1200"),
+                mini_signal_timeout_ms=int(self._mini_signal_timeout_ms_var.get().strip() or "100"),
+                roi_lock_delay_ms=int(self._roi_lock_delay_ms_var.get().strip() or "500"),
             )
         except ValueError:
             messagebox.showerror("参数错误", "YOLO/OSC 参数格式不正确，请检查数字输入。")

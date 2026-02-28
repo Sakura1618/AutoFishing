@@ -13,6 +13,9 @@ def test_default_config_values():
     assert cfg.success_disappear_ms == 500
     assert cfg.infer_fps == 60
     assert cfg.loop_fps == 60
+    assert cfg.mini_up_full_ms == 700.0
+    assert cfg.mini_hold_min_ms == 150
+    assert cfg.mini_hold_max_ms == 350
 
 
 def test_resolve_model_path_prefers_explicit(tmp_path: Path):
@@ -32,3 +35,11 @@ def test_pick_default_model_path_prefers_trained_best(tmp_path: Path):
     fallback.parent.mkdir(parents=True, exist_ok=True)
     fallback.write_bytes(b"y")
     assert pick_default_model_path(app) == best
+
+
+def test_pick_default_model_path_falls_back_to_yolo11n(tmp_path: Path):
+    app = tmp_path
+    fallback = app / "yolo_train" / "yolo11n.pt"
+    fallback.parent.mkdir(parents=True, exist_ok=True)
+    fallback.write_bytes(b"y")
+    assert pick_default_model_path(app) == fallback
