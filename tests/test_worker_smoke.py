@@ -43,6 +43,17 @@ def test_worker_starts_and_stops_cleanly():
     assert any("stopped" in msg for msg in logs)
 
 
+def test_worker_uses_flipped_y_axis_for_minigame():
+    worker = AutoFishWorker(
+        cfg=AutoFishConfig(loop_fps=10),
+        detector=FakeDetector(),
+        capture=FakeCapture(),
+        input_ctl=FakeInput(),
+        log_cb=lambda _x: None,
+    )
+    assert worker._mini.hold_decreases_y is False
+
+
 def test_worker_normalize_capture_result_tuple():
     frame, origin = AutoFishWorker._normalize_capture_result((object(), (123, 456)))
     assert origin == (123, 456)

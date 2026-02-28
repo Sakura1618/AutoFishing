@@ -42,7 +42,7 @@ class AutoFishWorker:
             move_forward_s=cfg.move_forward_s,
             success_disappear_ms=cfg.success_disappear_ms,
         )
-        self._mini = MinigameController()
+        self._mini = MinigameController(hold_decreases_y=False)
         try:
             self._matcher = FishTemplateMatcher.from_template_dir(
                 Path.cwd() / "img",
@@ -120,6 +120,7 @@ class AutoFishWorker:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         self.log_cb("worker started")
+        self.log_cb(f"minigame axis: hold_decreases_y={self._mini.hold_decreases_y}")
 
     def stop(self) -> None:
         self._stop_evt.set()
