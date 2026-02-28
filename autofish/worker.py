@@ -9,6 +9,7 @@ import cv2
 from .config import AutoFishConfig
 from .minigame import HoldAction, MinigameController
 from .state_machine import AutoFishState, FishingStateMachine
+from .vision import estimate_fish_and_zone
 from .win32_api import VK_S, VK_W
 
 
@@ -44,6 +45,11 @@ class AutoFishWorker:
         self._last_infer_ts = 0.0
         self._bite_hits = 0
         self._bar_hits = 0
+        self._loop_id = 0
+        self._yolo0_id = 0
+        self._yolo1_id = 0
+        self._await_next_yolo1 = False
+        self._roi_anchor_bbox = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -84,11 +90,16 @@ class AutoFishWorker:
                 self._last_infer_ts = now
             else:
                 det = self._last_det
+            det = dict(det)
             det["origin"] = frame_origin
+            raw_boxes = det.get("boxes", [])
+            annotated_boxes = self._annotate_boxes(raw_boxes)
+            det["boxes"] = annotated_boxes
             det["boxes_screen"] = [
                 {
                     "cls": b["cls"],
                     "conf": b["conf"],
+                    "id": b.get("id"),
                     "bbox": (
                         b["bbox"][0] + frame_origin[0],
                         b["bbox"][1] + frame_origin[1],
@@ -96,8 +107,14 @@ class AutoFishWorker:
                         b["bbox"][3] + frame_origin[1],
                     ),
                 }
-                for b in det.get("boxes", [])
+                for b in annotated_boxes
             ]
+            selected_bar = self._select_bar_bbox(annotated_boxes)
+            fish_y, zone_y = estimate_fish_and_zone(frame, selected_bar)
+            det["bar_bbox"] = selected_bar
+            det["has_bar"] = selected_bar is not None
+            det["fish_y"] = fish_y
+            det["zone_y"] = zone_y
             if det.get("has_bite"):
                 self._bite_hits += 1
             if det.get("has_bar"):
@@ -122,11 +139,17 @@ class AutoFishWorker:
             self.status_cb(self._sm.state.value)
 
             if out.click_cast:
+                self._loop_id += 1
+                self._yolo0_id = 0
+                self._yolo1_id = 0
+                self._await_next_yolo1 = False
+                self._roi_anchor_bbox = None
                 self.input_ctl.click_left()
-                self.log_cb("cast click")
+                self.log_cb(f"cast click (loop={self._loop_id})")
             if out.click_hook:
                 self.input_ctl.click_left()
-                self.log_cb("hook click")
+                self._await_next_yolo1 = True
+                self.log_cb(f"hook click (loop={self._loop_id})")
             if out.hold_back_s > 0:
                 if hasattr(self.input_ctl, "hold_key_for"):
                     self.input_ctl.hold_key_for(VK_S, out.hold_back_s)
@@ -169,12 +192,14 @@ class AutoFishWorker:
             conf = b["conf"]
             color = (0, 255, 255) if cls_id == 0 else (0, 180, 0)
             cv2.rectangle(yolo, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(yolo, f"{cls_id}:{conf:.2f}", (x1, max(16, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            bid = b.get("id", "")
+            cv2.putText(yolo, f"{bid} {cls_id}:{conf:.2f}", (x1, max(16, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
         bar = det.get("bar_bbox")
         roi = None
         if bar is not None:
             x1, y1, x2, y2 = bar
+            cv2.rectangle(yolo, (x1, y1), (x2, y2), (255, 120, 0), 2)
             h, w = frame.shape[:2]
             x1 = max(0, min(x1, w - 1))
             x2 = max(0, min(x2, w))
@@ -199,3 +224,55 @@ class AutoFishWorker:
         if isinstance(cap, tuple) and len(cap) == 2:
             return cap[0], cap[1]
         return cap, (0, 0)
+
+    def _annotate_boxes(self, boxes):
+        out = []
+        for b in boxes:
+            cls_id = int(b.get("cls", -1))
+            if cls_id == 0:
+                self._yolo0_id += 1
+                bid = f"L{self._loop_id}-0-{self._yolo0_id}"
+            elif cls_id == 1:
+                self._yolo1_id += 1
+                bid = f"L{self._loop_id}-1-{self._yolo1_id}"
+            else:
+                bid = f"L{self._loop_id}-x"
+            bb = dict(b)
+            bb["id"] = bid
+            out.append(bb)
+        return out
+
+    def _select_bar_bbox(self, boxes):
+        # class-1 before hook click should not be used as ROI.
+        class1 = [b for b in boxes if int(b.get("cls", -1)) == 1]
+        if self._sm.state == AutoFishState.WAIT_BITE:
+            if self._await_next_yolo1 and class1:
+                self._roi_anchor_bbox = class1[0]["bbox"]
+                self._await_next_yolo1 = False
+                return self._roi_anchor_bbox
+            return None
+        if self._sm.state == AutoFishState.MINIGAME:
+            if not class1:
+                return None
+            if self._roi_anchor_bbox is None:
+                self._roi_anchor_bbox = class1[0]["bbox"]
+                return self._roi_anchor_bbox
+            best = max(class1, key=lambda b: self._bbox_iou(self._roi_anchor_bbox, b["bbox"]))
+            self._roi_anchor_bbox = best["bbox"]
+            return self._roi_anchor_bbox
+        return None
+
+    @staticmethod
+    def _bbox_iou(a, b) -> float:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+        inter = iw * ih
+        if inter <= 0:
+            return 0.0
+        area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
+        area_b = max(1, (bx2 - bx1) * (by2 - by1))
+        union = area_a + area_b - inter
+        return float(inter / max(1, union))
