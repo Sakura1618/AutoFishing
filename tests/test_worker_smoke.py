@@ -95,3 +95,31 @@ def test_signal_smoothing_clamps_spike():
     assert s2 is not None
     # Spike should be clamped and smoothed, not jump to 200.
     assert s2 < 130.0
+
+
+def test_minigame_ready_after_bar_drop():
+    worker = AutoFishWorker(
+        cfg=AutoFishConfig(loop_fps=10),
+        detector=FakeDetector(),
+        capture=FakeCapture(),
+        input_ctl=FakeInput(),
+        log_cb=lambda _x: None,
+    )
+    worker._mini_enter_ms = 1000
+    worker._mini_ready = False
+    assert worker._update_minigame_ready(zone_y=100.0, now_ms=1010) is False
+    assert worker._update_minigame_ready(zone_y=102.0, now_ms=1030) is False
+    assert worker._update_minigame_ready(zone_y=104.2, now_ms=1060) is True
+
+
+def test_minigame_ready_timeout_fallback():
+    worker = AutoFishWorker(
+        cfg=AutoFishConfig(loop_fps=10),
+        detector=FakeDetector(),
+        capture=FakeCapture(),
+        input_ctl=FakeInput(),
+        log_cb=lambda _x: None,
+    )
+    worker._mini_enter_ms = 1000
+    worker._mini_ready = False
+    assert worker._update_minigame_ready(zone_y=None, now_ms=2205) is True

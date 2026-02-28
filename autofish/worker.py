@@ -78,6 +78,13 @@ class AutoFishWorker:
         self._loop_stat_count = 0
         self._infer_stat_count = 0
         self._stat_last_ts = time.time()
+        self._last_sm_state = self._sm.state
+        self._mini_ready = False
+        self._mini_enter_ms = 0
+        self._mini_prev_zone_y: float | None = None
+        self._mini_drop_start_y: float | None = None
+        self._mini_drop_need_px = 3.0
+        self._mini_wait_max_ms = 1200
         self._roi_smooth_alpha = 0.2
         self._roi_jump_px = 6
         self._signal_alpha = 0.35
@@ -180,6 +187,7 @@ class AutoFishWorker:
                     self._bite_hits = 0
                     self._bar_hits = 0
             out = self._sm.tick(now_ms=now_ms, has_bite=bool(det.get("has_bite")), has_bar=bool(det.get("has_bar")))
+            self._handle_state_transition(now_ms=now_ms)
             self.status_cb(self._sm.state.value)
 
             if out.click_cast:
@@ -214,7 +222,12 @@ class AutoFishWorker:
             if self._sm.state == AutoFishState.MINIGAME:
                 fish_y = det.get("fish_y")
                 zone_y = det.get("zone_y")
-                if fish_y is not None and zone_y is not None:
+                ready = self._update_minigame_ready(zone_y=None if zone_y is None else float(zone_y), now_ms=now_ms)
+                if not ready:
+                    if hasattr(self.input_ctl, "set_left_hold"):
+                        self.input_ctl.set_left_hold(False)
+                    self._last_hold_action = None
+                elif fish_y is not None and zone_y is not None:
                     action = self._mini.decide(
                         fish_y=float(fish_y),
                         zone_center_y=float(zone_y),
@@ -330,6 +343,16 @@ class AutoFishWorker:
                     (120, 255, 160),
                     1,
                 )
+                if self._sm.state == AutoFishState.MINIGAME and not self._mini_ready:
+                    cv2.putText(
+                        roi,
+                        "ready:WAIT_DROP",
+                        (4, 94),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (80, 200, 255),
+                        1,
+                    )
         return yolo, roi
 
     @staticmethod
@@ -457,6 +480,46 @@ class AutoFishWorker:
         zone_top = y1 + float(band.top)
         zone_bottom = y1 + float(band.bottom)
         return fish_y, zone_y, zone_top, zone_bottom
+
+    def _handle_state_transition(self, now_ms: int) -> None:
+        if self._sm.state == self._last_sm_state:
+            return
+        if self._sm.state == AutoFishState.MINIGAME:
+            self._mini_ready = False
+            self._mini_enter_ms = now_ms
+            self._mini_prev_zone_y = None
+            self._mini_drop_start_y = None
+            if hasattr(self.input_ctl, "set_left_hold"):
+                self.input_ctl.set_left_hold(False)
+            self.log_cb("minigame warmup: waiting for bar drop")
+        elif self._last_sm_state == AutoFishState.MINIGAME:
+            self._mini_ready = False
+            self._mini_prev_zone_y = None
+            self._mini_drop_start_y = None
+            if hasattr(self.input_ctl, "set_left_hold"):
+                self.input_ctl.set_left_hold(False)
+        self._last_sm_state = self._sm.state
+
+    def _update_minigame_ready(self, zone_y: float | None, now_ms: int) -> bool:
+        if self._mini_ready:
+            return True
+        if now_ms - self._mini_enter_ms >= self._mini_wait_max_ms:
+            self._mini_ready = True
+            self.log_cb("minigame warmup: timeout, control enabled")
+            return True
+        if zone_y is None:
+            return False
+        y = float(zone_y)
+        if self._mini_drop_start_y is None:
+            self._mini_drop_start_y = y
+            self._mini_prev_zone_y = y
+            return False
+        self._mini_prev_zone_y = y
+        if y - float(self._mini_drop_start_y) >= self._mini_drop_need_px:
+            self._mini_ready = True
+            self.log_cb("minigame warmup: bar drop detected, control enabled")
+            return True
+        return False
 
     def _stabilize_measurements(self, fish_y, zone_y, zone_top, zone_bottom):
         fish_s = self._smooth_signal("fish_y", fish_y)
