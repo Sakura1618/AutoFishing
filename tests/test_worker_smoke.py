@@ -1,4 +1,5 @@
 from autofish.config import AutoFishConfig
+from autofish.minigame import HoldAction
 from autofish.state_machine import AutoFishState
 from autofish.worker import AutoFishWorker
 
@@ -159,3 +160,34 @@ def test_apply_left_hold_respects_cooldown():
     worker._hold_cooldown_until_ms = 2000
     worker._apply_left_hold(True, now_ms=1500)
     assert fake_in.hold_states == []
+
+
+def test_recovery_mode_starts_when_fish_outside_zone():
+    worker = AutoFishWorker(
+        cfg=AutoFishConfig(loop_fps=10),
+        detector=FakeDetector(),
+        capture=FakeCapture(),
+        input_ctl=FakeInput(),
+        log_cb=lambda _x: None,
+    )
+    act = worker._recovery_decide(fish_y=50.0, zone_top=90.0, zone_bottom=110.0, now_ms=1000)
+    assert worker._recovery_mode is True
+    assert act == HoldAction.RELEASE
+
+
+def test_recovery_mode_exits_after_fish_back_inside():
+    worker = AutoFishWorker(
+        cfg=AutoFishConfig(loop_fps=10),
+        detector=FakeDetector(),
+        capture=FakeCapture(),
+        input_ctl=FakeInput(),
+        log_cb=lambda _x: None,
+    )
+    worker._recovery_mode = True
+    a1 = worker._recovery_decide(fish_y=100.0, zone_top=90.0, zone_bottom=110.0, now_ms=1000)
+    a2 = worker._recovery_decide(fish_y=100.5, zone_top=90.0, zone_bottom=110.0, now_ms=1016)
+    a3 = worker._recovery_decide(fish_y=99.5, zone_top=90.0, zone_bottom=110.0, now_ms=1032)
+    assert a1 == HoldAction.RELEASE
+    assert a2 == HoldAction.RELEASE
+    assert a3 == HoldAction.KEEP
+    assert worker._recovery_mode is False
