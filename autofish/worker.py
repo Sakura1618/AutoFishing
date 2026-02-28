@@ -14,9 +14,7 @@ from .minigame import (
     FishTemplateMatcher,
     HoldAction,
     MinigameController,
-    detect_fish_by_color_peak,
-    detect_fish_by_motion_peak,
-    detect_fish_by_width_peak,
+    detect_fish_fused,
     detect_white_zone_band,
 )
 from .state_machine import AutoFishState, FishingStateMachine
@@ -133,6 +131,16 @@ class AutoFishWorker:
         self._mini_hold_min_ms = int(cfg.mini_hold_min_ms)
         self._mini_hold_max_ms = int(cfg.mini_hold_max_ms)
         self._mini_brake_ms = int(cfg.mini_brake_ms)
+        self._mini_acc_up = 0.00024
+        self._mini_acc_down = 0.00030
+        self._mini_v_up = 0.0
+        self._mini_v_down = 0.0
+        self._mini_v_cap = 1.6
+        self._mini_press_streak_ms = 0.0
+        self._mini_release_streak_ms = 0.0
+        self._mini_last_want_hold = False
+        self._mini_err_rate_ema = 0.0
+        self._mini_err_rate_alpha = 0.35
         self._left_hold_active = False
         self._left_hold_since_ms = 0
         self._max_hold_ms = 260
@@ -292,6 +300,12 @@ class AutoFishWorker:
                 self._mini_hold_active = False
                 self._mini_hold_until_ms = 0
                 self._mini_release_until_ms = 0
+                self._mini_v_up = 0.0
+                self._mini_v_down = 0.0
+                self._mini_press_streak_ms = 0.0
+                self._mini_release_streak_ms = 0.0
+                self._mini_last_want_hold = False
+                self._mini_err_rate_ema = 0.0
                 self._left_hold_active = False
                 self._left_hold_since_ms = 0
                 self._hold_cooldown_until_ms = 0
@@ -620,19 +634,14 @@ class AutoFishWorker:
             self._fish_prev_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         else:
             # Non-template fish detection (no fallback-dark).
-            # Priority: width-peak -> color-peak -> motion-peak.
-            # Motion needs previous stable ROI gray frame.
             diff = None
             gray_u8 = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
             if self._fish_prev_gray is not None and self._fish_prev_gray.shape == gray_u8.shape:
                 diff = cv2.absdiff(gray_u8, self._fish_prev_gray)
             self._fish_prev_gray = gray_u8
 
-            cand = detect_fish_by_width_peak(roi, band)
-            if cand is None:
-                cand = detect_fish_by_color_peak(roi, band)
-            if cand is None:
-                cand = detect_fish_by_motion_peak(roi, band, diff)
+            prefer_local_y = None if band is None else float(band.center)
+            cand = detect_fish_fused(roi, band, diff, prefer_y=prefer_local_y)
 
             if cand is not None:
                 fish_y = y1 + float(cand.fish_y) + stab_dy
@@ -702,6 +711,12 @@ class AutoFishWorker:
             self._mini_hold_active = False
             self._mini_hold_until_ms = 0
             self._mini_release_until_ms = 0
+            self._mini_v_up = 0.0
+            self._mini_v_down = 0.0
+            self._mini_press_streak_ms = 0.0
+            self._mini_release_streak_ms = 0.0
+            self._mini_last_want_hold = False
+            self._mini_err_rate_ema = 0.0
             self._apply_left_hold(False, now_ms=now_ms)
             self._reset_relative_tap()
             self._reset_bottom_rescue()
@@ -781,6 +796,53 @@ class AutoFishWorker:
         ms = lo + (float(up_full_ms) * max(0.0, float(abs_err_px)) / tpx)
         return int(max(lo, min(hi, round(ms))))
 
+    def _update_white_bar_velocity(self, want_hold: bool, dt_ms: float) -> None:
+        dt = max(1.0, float(dt_ms))
+        if want_hold:
+            self._mini_press_streak_ms += dt
+            self._mini_release_streak_ms = 0.0
+            gain = 1.0 + min(2.5, self._mini_press_streak_ms / 220.0)
+            self._mini_v_up = min(self._mini_v_cap, self._mini_v_up + self._mini_acc_up * gain * dt)
+            self._mini_v_down = max(0.0, self._mini_v_down - 0.0011 * dt)
+        else:
+            self._mini_release_streak_ms += dt
+            self._mini_press_streak_ms = 0.0
+            gain = 1.0 + min(2.5, self._mini_release_streak_ms / 220.0)
+            self._mini_v_down = min(self._mini_v_cap, self._mini_v_down + self._mini_acc_down * gain * dt)
+            self._mini_v_up = max(0.0, self._mini_v_up - 0.0011 * dt)
+        self._mini_last_want_hold = bool(want_hold)
+
+    def _calculate_click_duration(self, abs_err_px: float, track_px: float, mode: str, fish_speed: float) -> int:
+        dyn = min(40.0, fish_speed * 180.0 + self._mini_err_rate_ema * 4.0)
+        eff_min = max(120, int(self._mini_hold_min_ms - dyn * 0.6))
+        eff_max = min(380, int(self._mini_hold_max_ms + dyn * 0.8))
+        base = self._calc_hold_ms_from_error(
+            abs_err_px=abs_err_px,
+            track_px=track_px,
+            up_full_ms=self._mini_up_full_ms,
+            hold_min_ms=eff_min,
+            hold_max_ms=eff_max,
+        )
+        dur = float(base)
+        dur += self._mini_v_up * 85.0
+        dur -= self._mini_v_down * 60.0
+        if mode == "catchup":
+            dur += 20.0
+        if abs_err_px <= self._mini_dead_px * 1.25:
+            dur *= 0.85
+        return int(max(eff_min, min(eff_max, round(dur))))
+
+    def _calculate_click_interval(self, abs_err_px: float, mode: str, fish_speed: float) -> int:
+        base = self._mini_hold_interval_catch_ms if mode == "catchup" else self._mini_hold_interval_track_ms
+        interval = float(base)
+        interval += max(0.0, abs_err_px - self._mini_dead_px) * 1.8
+        interval += self._mini_v_down * 90.0
+        interval -= self._mini_v_up * 70.0
+        interval -= min(70.0, fish_speed * 200.0 + self._mini_err_rate_ema * 7.0)
+        if mode == "brake":
+            interval += 20.0
+        return int(max(60.0, min(420.0, round(interval))))
+
     def _run_minigame_controller(
         self,
         fish_y: float,
@@ -796,15 +858,20 @@ class AutoFishWorker:
             self._mini_fish_vel_ema = self._mini_fish_vel_ema * (1.0 - self._mini_vel_alpha) + inst_v * self._mini_vel_alpha
         self._mini_last_fish_y = fish_y
         self._mini_last_ctrl_ms = now_ms
-        # Adaptive prediction: reduce lead when close to target to avoid overshoot.
         err_raw = fish_y - zone_y
-        close_k = max(0.15, min(1.0, abs(err_raw) / max(1.0, float(self._mini_far_px))))
-        eff_predict_ms = float(self._mini_predict_ms) * close_k
+        fish_speed = abs(float(self._mini_fish_vel_ema))
+        close_k = max(0.20, min(1.0, abs(err_raw) / max(1.0, float(self._mini_far_px))))
+        speed_k = 1.0 + min(0.45, fish_speed * 32.0)
+        eff_predict_ms = float(self._mini_predict_ms) * close_k * speed_k
+        eff_predict_ms = min(float(self._mini_predict_ms) * 1.55, eff_predict_ms)
         pred_off = self._mini_fish_vel_ema * eff_predict_ms
-        pred_cap = max(3.0, self._mini_far_px * 0.45)
+        pred_cap = max(4.0, self._mini_far_px * 0.55)
         pred_off = max(-pred_cap, min(pred_cap, pred_off))
         fish_pred = fish_y + pred_off
         err = fish_pred - zone_y
+        if self._mini_err_prev is not None:
+            err_rate = abs((float(err) - float(self._mini_err_prev)) / max(1.0, dt))
+            self._mini_err_rate_ema = self._mini_err_rate_ema * (1.0 - self._mini_err_rate_alpha) + err_rate * self._mini_err_rate_alpha
         self._mini.last_control = float(err)
         self._mini.last_pred_fish_y = float(fish_pred)
 
@@ -839,7 +906,7 @@ class AutoFishWorker:
             elif err < -self._mini_dead_px:
                 want_hold = True
                 mode = "track_up"
-            elif err > self._mini_dead_px * 0.65:
+            elif err > self._mini_dead_px * (0.60 + min(0.25, fish_speed * 20.0)):
                 want_hold = False
                 mode = "track_down"
             else:
@@ -847,6 +914,7 @@ class AutoFishWorker:
                 mode = "coast"
         self._mini_err_prev = err
         self._mini_mode = mode
+        self._update_white_bar_velocity(want_hold=want_hold, dt_ms=dt)
 
         # End pulse when time is up.
         if self._mini_hold_active and now_ms >= self._mini_hold_until_ms:
@@ -867,8 +935,9 @@ class AutoFishWorker:
             self._apply_left_hold(False, now_ms=now_ms)
             return
 
-        interval_ms = self._mini_hold_interval_catch_ms if mode == "catchup" else self._mini_hold_interval_track_ms
-        urgent_press = urgent_up or err < -self._mini_far_px * 1.15
+        abs_err = abs(float(err))
+        interval_ms = self._calculate_click_interval(abs_err_px=abs_err, mode=mode, fish_speed=fish_speed)
+        urgent_press = urgent_up or err < -self._mini_far_px * 1.05
         if not urgent_press and now_ms - self._mini_hold_last_ms < interval_ms:
             return
         if not urgent_press and now_ms < self._mini_release_until_ms:
@@ -880,14 +949,7 @@ class AutoFishWorker:
                 track_px = max(40.0, float(bar_bbox[3] - bar_bbox[1]))
             except Exception:
                 track_px = self._mini_track_px_ref
-        up_full_ms = self._mini_up_full_ms * (0.90 if mode == "catchup" else 0.75)
-        hold_ms = self._calc_hold_ms_from_error(
-            abs_err_px=abs(err),
-            track_px=track_px,
-            up_full_ms=up_full_ms,
-            hold_min_ms=self._mini_hold_min_ms,
-            hold_max_ms=self._mini_hold_max_ms,
-        )
+        hold_ms = self._calculate_click_duration(abs_err_px=abs_err, track_px=track_px, mode=mode, fish_speed=fish_speed)
         self._apply_left_hold(True, now_ms=now_ms)
         self._mini_hold_active = True
         self._mini_hold_until_ms = now_ms + hold_ms

@@ -1,6 +1,6 @@
 import numpy as np
 
-from autofish.minigame import HoldAction, MinigameController, detect_dark_blob_center, detect_white_zone_band
+from autofish.minigame import HoldAction, MinigameController, detect_dark_blob_center, detect_fish_fused, detect_white_zone_band
 
 
 def test_hold_when_fish_above_center():
@@ -75,3 +75,16 @@ def test_detect_dark_blob_center_respects_band_limit():
     cy = detect_dark_blob_center(roi, prefer_y=66.0, band_top=56.0, band_bottom=80.0)
     assert cy is not None
     assert 62.0 <= cy <= 72.0
+
+
+def test_detect_fish_fused_returns_hit():
+    roi = np.full((96, 40, 3), (88, 168, 90), dtype=np.uint8)
+    roi[24:74, 10:30, :] = 245
+    roi[24:26, 9:31, :] = (80, 255, 80)
+    roi[72:74, 9:31, :] = (80, 255, 80)
+    roi[50:58, 8:33, :] = (160, 40, 180)
+    band = detect_white_zone_band(roi)
+    hit = detect_fish_fused(roi, band, diff_gray=None, prefer_y=None)
+    assert hit is not None
+    assert "fused:" in hit.method
+    assert 48.0 <= hit.fish_y <= 60.0

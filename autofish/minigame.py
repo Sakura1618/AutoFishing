@@ -364,17 +364,24 @@ def detect_white_zone_band(roi_bgr: np.ndarray) -> WhiteZoneBand | None:
     k_h = min(h - 1 if (h % 2 == 0) else h, k_h)
     white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, np.ones((k_h, 5), dtype=np.uint8))
     white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, np.ones((3, 2), dtype=np.uint8))
-    row_white_ratio = (white_mask > 0).mean(axis=1)
-    rows = np.where(row_white_ratio >= 0.20)[0]
+    row_white_raw = (white_mask > 0).mean(axis=1).astype(np.float32)
+    if row_white_raw.size >= 3:
+        row_white_ratio = np.convolve(row_white_raw, np.array([0.25, 0.5, 0.25], dtype=np.float32), mode="same")
+    else:
+        row_white_ratio = row_white_raw
+    thr = float(np.percentile(row_white_ratio, 75)) * 0.55
+    thr = max(0.16, min(0.32, thr))
+    rows = np.where(row_white_ratio >= thr)[0]
     if rows.size < 3:
         return None
 
     runs: list[tuple[int, int, float]] = []
     start = int(rows[0])
     prev = int(rows[0])
+    gap_allow = 1
     for y in rows[1:]:
         y = int(y)
-        if y == prev + 1:
+        if y <= prev + 1 + gap_allow:
             prev = y
             continue
         if prev - start + 1 >= 3:
@@ -500,6 +507,52 @@ class FishDetectHit:
     fish_y: float
     score: float
     method: str
+
+
+def detect_fish_fused(
+    roi_bgr: np.ndarray,
+    band: WhiteZoneBand | None,
+    diff_gray: np.ndarray | None,
+    prefer_y: float | None = None,
+) -> FishDetectHit | None:
+    """Fuse multiple fish detectors and pick the most reliable hit."""
+    cands: list[FishDetectHit] = []
+    h1 = detect_fish_by_width_peak(roi_bgr, band)
+    h2 = detect_fish_by_color_peak(roi_bgr, band)
+    h3 = detect_fish_by_motion_peak(roi_bgr, band, diff_gray)
+    for h in (h1, h2, h3):
+        if h is not None:
+            cands.append(h)
+    if not cands:
+        return None
+
+    def _norm_score(hit: FishDetectHit) -> float:
+        if hit.method == "width-peak":
+            return min(1.0, max(0.0, hit.score / 16.0))
+        if hit.method == "color-peak":
+            return min(1.0, max(0.0, hit.score / 36.0))
+        if hit.method == "motion-peak":
+            return min(1.0, max(0.0, hit.score / 20.0))
+        return min(1.0, max(0.0, hit.score / 20.0))
+
+    method_w = {
+        "width-peak": 1.00,
+        "color-peak": 0.95,
+        "motion-peak": 0.88,
+    }
+    ref_y = prefer_y if prefer_y is not None else (None if band is None else float(band.center))
+    best: FishDetectHit | None = None
+    best_score = -1e18
+    for hit in cands:
+        s = _norm_score(hit) * method_w.get(hit.method, 0.85)
+        if ref_y is not None:
+            s += max(0.0, 1.0 - abs(float(hit.fish_y) - float(ref_y)) / 40.0) * 0.35
+        if s > best_score:
+            best_score = s
+            best = hit
+    if best is None:
+        return None
+    return FishDetectHit(fish_y=float(best.fish_y), score=float(best_score), method=f"fused:{best.method}")
 
 
 def _estimate_bar_window_from_white(roi_bgr: np.ndarray) -> tuple[int, int, int, np.ndarray, np.ndarray] | None:

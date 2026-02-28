@@ -57,6 +57,7 @@ class AutoFishApp(tk.Tk):
         self._mini_wait_max_ms_var = tk.StringVar(value="1200")
         self._mini_signal_timeout_ms_var = tk.StringVar(value="100")
         self._roi_lock_delay_ms_var = tk.StringVar(value="500")
+        self._mini_preset_var = tk.StringVar(value="一般跟随")
         self._windows: list[tuple[int, str]] = []
         self._yolo_imgtk = None
         self._roi_imgtk = None
@@ -116,6 +117,17 @@ class AutoFishApp(tk.Tk):
 
         mini = ttk.LabelFrame(top, text="MiniGame")
         mini.grid(row=4, column=1, sticky="ew", padx=8, pady=(8, 0))
+        preset_row = ttk.Frame(mini)
+        preset_row.grid(row=0, column=0, columnspan=16, sticky="ew", padx=(2, 2), pady=(2, 4))
+        ttk.Label(preset_row, text="preset").pack(side=tk.LEFT)
+        ttk.Combobox(
+            preset_row,
+            textvariable=self._mini_preset_var,
+            values=["保守稳定", "一般跟随"],
+            state="readonly",
+            width=10,
+        ).pack(side=tk.LEFT, padx=(4, 6))
+        ttk.Button(preset_row, text="应用预设", command=self.apply_minigame_preset).pack(side=tk.LEFT)
         fields = [
             ("deadPx", self._mini_dead_px_var),
             ("farPx", self._mini_far_px_var),
@@ -135,7 +147,7 @@ class AutoFishApp(tk.Tk):
             ("roiLock", self._roi_lock_delay_ms_var),
         ]
         for i, (name, var) in enumerate(fields):
-            r = i // 8
+            r = (i // 8) + 1
             c = (i % 8) * 2
             ttk.Label(mini, text=name).grid(row=r, column=c, sticky="w", padx=(2, 2), pady=2)
             ttk.Entry(mini, textvariable=var, width=6).grid(row=r, column=c + 1, sticky="w", padx=(0, 6), pady=2)
@@ -172,6 +184,66 @@ class AutoFishApp(tk.Tk):
         got = filedialog.askopenfilename(filetypes=[("PyTorch Model", "*.pt"), ("All Files", "*.*")])
         if got:
             self._model_var.set(got)
+
+    def apply_minigame_preset(self) -> None:
+        presets = {
+            "保守稳定": {
+                "dead": "4.2",
+                "far": "28",
+                "predict": "110",
+                "alpha": "0.28",
+                "edge": "3.2",
+                "brake": "170",
+                "track_int": "140",
+                "catch_int": "90",
+                "track_px": "95",
+                "up_full": "760",
+                "hold_min": "150",
+                "hold_max": "260",
+                "drop": "3.0",
+                "wait": "1200",
+                "tout": "120",
+                "roi_lock": "500",
+            },
+            "一般跟随": {
+                "dead": "2.8",
+                "far": "20",
+                "predict": "145",
+                "alpha": "0.38",
+                "edge": "2.3",
+                "brake": "130",
+                "track_int": "110",
+                "catch_int": "65",
+                "track_px": "90",
+                "up_full": "700",
+                "hold_min": "150",
+                "hold_max": "320",
+                "drop": "3.0",
+                "wait": "1200",
+                "tout": "100",
+                "roi_lock": "500",
+            },
+        }
+        p = presets.get(self._mini_preset_var.get().strip())
+        if not p:
+            return
+        self._mini_dead_px_var.set(p["dead"])
+        self._mini_far_px_var.set(p["far"])
+        self._mini_predict_ms_var.set(p["predict"])
+        self._mini_vel_alpha_var.set(p["alpha"])
+        self._mini_edge_guard_px_var.set(p["edge"])
+        self._mini_brake_ms_var.set(p["brake"])
+        self._mini_hold_track_ms_var.set(p["track_int"])
+        self._mini_hold_catch_ms_var.set(p["catch_int"])
+        self._mini_track_px_ref_var.set(p["track_px"])
+        self._mini_up_full_ms_var.set(p["up_full"])
+        self._mini_hold_min_ms_var.set(p["hold_min"])
+        self._mini_hold_max_ms_var.set(p["hold_max"])
+        self._mini_drop_need_px_var.set(p["drop"])
+        self._mini_wait_max_ms_var.set(p["wait"])
+        self._mini_signal_timeout_ms_var.set(p["tout"])
+        self._roi_lock_delay_ms_var.set(p["roi_lock"])
+        self._log(f"已应用小游戏预设: {self._mini_preset_var.get().strip()}")
 
     def refresh_windows(self) -> None:
         self._windows = list_visible_windows()

@@ -30,6 +30,7 @@ class FishingStateMachine:
         self._cast_clicked_ms: int | None = None
         self._bar_missing_since_ms: int | None = None
         self._bite_latched = False
+        self._collect_clicked_ms: int | None = None
 
     def reset(self) -> None:
         self.state = AutoFishState.CAST
@@ -37,6 +38,7 @@ class FishingStateMachine:
         self._cast_clicked_ms = None
         self._bar_missing_since_ms = None
         self._bite_latched = False
+        self._collect_clicked_ms = None
 
     def tick(self, now_ms: int, has_bite: bool, has_bar: bool) -> TickOutput:
         out = TickOutput()
@@ -45,7 +47,7 @@ class FishingStateMachine:
                 self._cast_started_ms = now_ms
                 return out
             if self._cast_clicked_ms is None:
-                if now_ms - self._cast_started_ms >= 500:
+                if now_ms - self._cast_started_ms >= 1000:
                     out.click_cast = True
                     self._cast_clicked_ms = now_ms
                 return out
@@ -67,14 +69,19 @@ class FishingStateMachine:
         if self.state == AutoFishState.MINIGAME:
             if has_bar:
                 self._bar_missing_since_ms = None
+                self._collect_clicked_ms = None
+                return out
+            if self._collect_clicked_ms is not None:
+                if now_ms - self._collect_clicked_ms >= 1000:
+                    out.hold_forward_s = self.move_forward_s
+                    self.reset()
                 return out
             if self._bar_missing_since_ms is None:
                 self._bar_missing_since_ms = now_ms
                 return out
             if now_ms - self._bar_missing_since_ms >= self.success_disappear_ms:
                 out.click_collect = True
-                out.hold_forward_s = self.move_forward_s
-                self.reset()
+                self._collect_clicked_ms = now_ms
             return out
 
         return out
