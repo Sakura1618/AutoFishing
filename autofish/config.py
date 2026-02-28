@@ -17,10 +17,9 @@ class AutoFishConfig:
     input_retry_limit: int = 12
     osc_host: str = "127.0.0.1"
     osc_port: int = 9000
-    osc_param_click: str = "AutoFish_Click"
-    osc_param_hold: str = "AutoFish_Hold"
-    osc_param_back: str = "AutoFish_Back"
-    osc_param_forward: str = "AutoFish_Forward"
+    osc_click_button: str = "/input/UseRight"
+    osc_click_axis: str = "/input/UseAxisRight"
+    osc_vertical_axis: str = "/input/Vertical"
 
 
 def resolve_model_path(model_arg: str, app_dir: Path) -> Path:

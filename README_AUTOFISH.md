@@ -22,11 +22,9 @@ powershell -ExecutionPolicy Bypass -File "D:\Repositories\AutoFishing\run_autofi
 
 ## Notes
 
-- Input is sent through VRChat OSC (`/avatar/parameters/*`), not OS keyboard/mouse injection.
-- Required avatar parameters (bool):
-  - `AutoFish_Click`
-  - `AutoFish_Hold`
-  - `AutoFish_Back`
-  - `AutoFish_Forward`
+- Input is sent through VRChat OSC Input Controller (`/input/*`), not avatar parameters.
+- Default mappings:
+  - Click / Hold: `/input/UseRight` + `/input/UseAxisRight`
+  - Move back/forward: `/input/Vertical` (`-1` / `+1`)
 - `yolo_train` remains dedicated to manual model training only.
 - Default fishing sequence follows `自动钓鱼.txt`.

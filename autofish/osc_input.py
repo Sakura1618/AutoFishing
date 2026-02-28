@@ -13,23 +13,31 @@ class OscInputSink:
         self.client = OscClient(cfg.osc_host, cfg.osc_port)
         self._left_held = False
 
-    def _pulse(self, param_name: str, duration_s: float = 0.05) -> bool:
-        ok1 = self.client.send_parameter(param_name, True)
+    def _pulse_button(self, address: str, duration_s: float = 0.05) -> bool:
+        ok1 = self.client.send_button(address, True)
         time.sleep(max(0.0, duration_s))
-        ok2 = self.client.send_parameter(param_name, False)
+        ok2 = self.client.send_button(address, False)
+        return bool(ok1 and ok2)
+
+    def _pulse_axis(self, address: str, value: float, duration_s: float = 0.05) -> bool:
+        ok1 = self.client.send_axis(address, value)
+        time.sleep(max(0.0, duration_s))
+        ok2 = self.client.send_axis(address, 0.0)
         return bool(ok1 and ok2)
 
     def click_left_message(self) -> bool:
-        return self._pulse(self.cfg.osc_param_click, 0.03)
+        ok_button = self._pulse_button(self.cfg.osc_click_button, 0.03)
+        ok_axis = self._pulse_axis(self.cfg.osc_click_axis, 1.0, 0.03)
+        return bool(ok_button or ok_axis)
 
     def click_left_sendinput(self) -> bool:
-        return self._pulse(self.cfg.osc_param_click, 0.03)
+        return self.click_left_message()
 
     def key_hold_message(self, vk_code: int, duration_s: float) -> bool:
         if vk_code == VK_S:
-            return self._pulse(self.cfg.osc_param_back, duration_s)
+            return self._pulse_axis(self.cfg.osc_vertical_axis, -1.0, duration_s)
         if vk_code == VK_W:
-            return self._pulse(self.cfg.osc_param_forward, duration_s)
+            return self._pulse_axis(self.cfg.osc_vertical_axis, 1.0, duration_s)
         return False
 
     def key_hold_sendinput(self, vk_code: int, duration_s: float) -> bool:
@@ -38,7 +46,9 @@ class OscInputSink:
     def set_left_hold_message(self, hold: bool) -> bool:
         if hold == self._left_held:
             return True
-        ok = self.client.send_parameter(self.cfg.osc_param_hold, hold)
+        ok_button = self.client.send_button(self.cfg.osc_click_button, hold)
+        ok_axis = self.client.send_axis(self.cfg.osc_click_axis, 1.0 if hold else 0.0)
+        ok = bool(ok_button or ok_axis)
         if ok:
             self._left_held = hold
         return ok
@@ -48,9 +58,7 @@ class OscInputSink:
 
     def release_all(self) -> None:
         if self._left_held:
-            self.client.send_parameter(self.cfg.osc_param_hold, False)
+            self.client.send_button(self.cfg.osc_click_button, False)
+            self.client.send_axis(self.cfg.osc_click_axis, 0.0)
             self._left_held = False
-        self.client.send_parameter(self.cfg.osc_param_click, False)
-        self.client.send_parameter(self.cfg.osc_param_back, False)
-        self.client.send_parameter(self.cfg.osc_param_forward, False)
-
+        self.client.send_axis(self.cfg.osc_vertical_axis, 0.0)

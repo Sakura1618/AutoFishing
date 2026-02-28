@@ -34,11 +34,17 @@ class OscClient:
         self.port = int(port)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    def send_parameter(self, param_name: str, value: int | float | bool) -> bool:
+    def send_message(self, address: str, value: int | float | bool) -> bool:
         try:
-            payload = build_osc_message(f"/avatar/parameters/{param_name}", value)
+            payload = build_osc_message(address, value)
             sent = self.sock.sendto(payload, (self.host, self.port))
             return sent > 0
         except OSError:
             return False
 
+    def send_button(self, address: str, pressed: bool) -> bool:
+        return self.send_message(address, 1 if pressed else 0)
+
+    def send_axis(self, address: str, value: float) -> bool:
+        value = max(-1.0, min(1.0, float(value)))
+        return self.send_message(address, value)
