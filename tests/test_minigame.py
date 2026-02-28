@@ -1,6 +1,6 @@
 import numpy as np
 
-from autofish.minigame import HoldAction, MinigameController, detect_white_zone_band
+from autofish.minigame import HoldAction, MinigameController, detect_dark_blob_center, detect_white_zone_band
 
 
 def test_hold_when_fish_above_center():
@@ -43,3 +43,11 @@ def test_detect_white_zone_band_edges():
     assert band is not None
     assert 23 <= band.top <= 25
     assert 36 <= band.bottom <= 38
+
+
+def test_detect_dark_blob_center():
+    roi = np.full((90, 40, 3), 210, dtype=np.uint8)
+    roi[58:70, 12:28, :] = 20
+    cy = detect_dark_blob_center(roi, prefer_y=64.0)
+    assert cy is not None
+    assert 60.0 <= cy <= 68.0

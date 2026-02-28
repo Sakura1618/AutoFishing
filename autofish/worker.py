@@ -9,7 +9,7 @@ import cv2
 from pathlib import Path
 
 from .config import AutoFishConfig
-from .minigame import FishTemplateMatcher, HoldAction, MinigameController, detect_white_zone_band
+from .minigame import FishTemplateMatcher, HoldAction, MinigameController, detect_dark_blob_center, detect_white_zone_band
 from .state_machine import AutoFishState, FishingStateMachine
 from .win32_api import VK_S, VK_W
 
@@ -49,6 +49,9 @@ class AutoFishWorker:
                 threshold=0.55,
                 scales=(0.9, 1.0, 1.1),
                 lost_hold_ms=300,
+                local_expand=2.1,
+                local_track_ms=300,
+                smooth_alpha=0.40,
             )
         except Exception:
             self._matcher = None
@@ -513,12 +516,13 @@ class AutoFishWorker:
             self._mini_score = hit.score
             self._mini_template = hit.template_name
         else:
-            # Fallback: darkest blob center in ROI, keeps control alive when template misses.
-            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-            blur = cv2.GaussianBlur(gray, (5, 5), 0)
-            min_val, _, min_loc, _ = cv2.minMaxLoc(blur)
-            if min_val < 160:
-                fish_y = y1 + float(min_loc[1])
+            # Fallback: detect darkest connected blob center, less noisy than min-pixel.
+            prefer_local_y = None
+            if band is not None:
+                prefer_local_y = float(band.center)
+            fb_y = detect_dark_blob_center(roi, prefer_y=prefer_local_y)
+            if fb_y is not None:
+                fish_y = y1 + float(fb_y)
                 self._mini_score = 0.0
                 self._mini_template = "fallback-dark"
         if band is None:

@@ -178,11 +178,17 @@ class FishTemplateMatcher:
         scales: Sequence[float] = (0.9, 1.0, 1.1),
         threshold: float = 0.55,
         lost_hold_ms: int = 300,
+        local_expand: float = 2.0,
+        local_track_ms: int = 280,
+        smooth_alpha: float = 0.45,
     ) -> None:
         self.templates = list(templates)
         self.scales = list(scales)
         self.threshold = threshold
         self.lost_hold_ms = lost_hold_ms
+        self.local_expand = max(1.0, float(local_expand))
+        self.local_track_ms = max(0, int(local_track_ms))
+        self.smooth_alpha = min(1.0, max(0.0, float(smooth_alpha)))
         self._last_hit: MatchHit | None = None
         self._last_hit_ms: int = 0
 
@@ -193,6 +199,9 @@ class FishTemplateMatcher:
         scales: Sequence[float] = (0.9, 1.0, 1.1),
         threshold: float = 0.55,
         lost_hold_ms: int = 300,
+        local_expand: float = 2.0,
+        local_track_ms: int = 280,
+        smooth_alpha: float = 0.45,
     ) -> "FishTemplateMatcher":
         packs: list[TemplatePack] = []
         files = sorted(template_dir.glob("*.png")) + sorted(template_dir.glob("*.jpg")) + sorted(template_dir.glob("*.jpeg"))
@@ -206,37 +215,90 @@ class FishTemplateMatcher:
             packs.append(TemplatePack(name=p.name, edge=edge))
         if not packs:
             raise RuntimeError(f"No valid fish templates loaded from: {template_dir}")
-        return cls(packs, scales=scales, threshold=threshold, lost_hold_ms=lost_hold_ms)
+        return cls(
+            packs,
+            scales=scales,
+            threshold=threshold,
+            lost_hold_ms=lost_hold_ms,
+            local_expand=local_expand,
+            local_track_ms=local_track_ms,
+            smooth_alpha=smooth_alpha,
+        )
 
     def locate(self, roi_bgr: np.ndarray, now_ms: int) -> MatchHit | None:
         if roi_bgr is None or roi_bgr.size == 0:
             return self._hold_last(now_ms)
         gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
         edge_roi = cv2.Canny(gray, 50, 120)
+        best = self._search_local_first(edge_roi=edge_roi, now_ms=now_ms)
+        if best is None:
+            best = self._scan_templates(edge_roi=edge_roi, x_off=0, y_off=0)
+        if best is not None and best.score >= self.threshold:
+            if self._last_hit is not None:
+                best = self._smooth_hit(best, self._last_hit)
+            self._last_hit = best
+            self._last_hit_ms = now_ms
+            return best
+        return self._hold_last(now_ms)
+
+    def _search_local_first(self, edge_roi: np.ndarray, now_ms: int) -> MatchHit | None:
+        if self._last_hit is None:
+            return None
+        if now_ms - self._last_hit_ms > self.local_track_ms:
+            return None
+        h, w = edge_roi.shape[:2]
+        x1, y1, x2, y2 = self._last_hit.bbox
+        bw = max(1, x2 - x1)
+        bh = max(1, y2 - y1)
+        cx = (x1 + x2) * 0.5
+        cy = (y1 + y2) * 0.5
+        hw = int(round(bw * self.local_expand))
+        hh = int(round(bh * self.local_expand))
+        lx1 = max(0, int(round(cx - hw)))
+        ly1 = max(0, int(round(cy - hh)))
+        lx2 = min(w, int(round(cx + hw)))
+        ly2 = min(h, int(round(cy + hh)))
+        if lx2 - lx1 < 8 or ly2 - ly1 < 8:
+            return None
+        local = edge_roi[ly1:ly2, lx1:lx2]
+        hit = self._scan_templates(edge_roi=local, x_off=lx1, y_off=ly1)
+        if hit is None:
+            return None
+        # Local tracking allows slightly lower score than global threshold.
+        if hit.score >= max(0.35, self.threshold - 0.12):
+            return hit
+        return None
+
+    def _scan_templates(self, edge_roi: np.ndarray, x_off: int, y_off: int) -> MatchHit | None:
         best: MatchHit | None = None
+        rh, rw = edge_roi.shape[:2]
         for pack in self.templates:
             for s in self.scales:
                 t = _resize_edge(pack.edge, s)
                 th, tw = t.shape[:2]
-                rh, rw = edge_roi.shape[:2]
                 if th < 4 or tw < 4 or th >= rh or tw >= rw:
                     continue
                 result = cv2.matchTemplate(edge_roi, t, cv2.TM_CCOEFF_NORMED)
                 _, max_val, _, max_loc = cv2.minMaxLoc(result)
                 x, y = max_loc
                 hit = MatchHit(
-                    fish_y=float(y + th / 2.0),
+                    fish_y=float(y + y_off + th / 2.0),
                     score=float(max_val),
-                    bbox=(x, y, x + tw, y + th),
+                    bbox=(x + x_off, y + y_off, x + x_off + tw, y + y_off + th),
                     template_name=pack.name,
                 )
                 if best is None or hit.score > best.score:
                     best = hit
-        if best is not None and best.score >= self.threshold:
-            self._last_hit = best
-            self._last_hit_ms = now_ms
-            return best
-        return self._hold_last(now_ms)
+        return best
+
+    def _smooth_hit(self, cur: MatchHit, prev: MatchHit) -> MatchHit:
+        a = self.smooth_alpha
+        if a <= 0.0:
+            return cur
+        py = prev.fish_y
+        cy = cur.fish_y
+        sy = py * (1.0 - a) + cy * a
+        return MatchHit(fish_y=float(sy), score=cur.score, bbox=cur.bbox, template_name=cur.template_name)
 
     def _hold_last(self, now_ms: int) -> MatchHit | None:
         if self._last_hit is None:
@@ -281,6 +343,44 @@ def detect_white_zone_band(roi_bgr: np.ndarray) -> WhiteZoneBand | None:
         return None
     strength = float(row_ratio[top : bottom + 1].mean())
     return WhiteZoneBand(top=top, bottom=bottom, center=(top + bottom) / 2.0, strength=strength)
+
+
+def detect_dark_blob_center(roi_bgr: np.ndarray, prefer_y: float | None = None) -> float | None:
+    if roi_bgr is None or roi_bgr.size == 0:
+        return None
+    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    q = float(np.percentile(blur, 24))
+    th = int(max(40.0, min(165.0, q)))
+    mask = (blur <= th).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), dtype=np.uint8))
+    num, labels, stats, cent = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if num <= 1:
+        return None
+    h, w = blur.shape[:2]
+    best_idx = -1
+    best_score = -1e18
+    for i in range(1, num):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < 10 or area > int(h * w * 0.5):
+            continue
+        cy = float(cent[i, 1])
+        cx = float(cent[i, 0])
+        x = int(stats[i, cv2.CC_STAT_LEFT])
+        y = int(stats[i, cv2.CC_STAT_TOP])
+        ww = int(stats[i, cv2.CC_STAT_WIDTH])
+        hh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        patch = blur[y : y + hh, x : x + ww]
+        darkness = 255.0 - float(np.mean(patch))
+        center_bonus = -abs(cx - (w * 0.5)) * 0.15
+        pref_bonus = 0.0 if prefer_y is None else -abs(cy - float(prefer_y)) * 0.35
+        score = darkness + center_bonus + pref_bonus
+        if score > best_score:
+            best_score = score
+            best_idx = i
+    if best_idx <= 0:
+        return None
+    return float(cent[best_idx, 1])
 
 
 def _resize_edge(edge: np.ndarray, scale: float) -> np.ndarray:
