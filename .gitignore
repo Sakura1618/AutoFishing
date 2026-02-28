@@ -1,0 +1,24 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Test/cache
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Training artifacts and large data
+yolo_train/img/
+yolo_train/txt/
+yolo_train/video/
+yolo_train/yolo_dataset/
+yolo_train/yolo_dataset_v2/
+yolo_train/runs/
+yolo_train/runs_yolo/
+*.pt
+
+# OS
+Thumbs.db
+Desktop.ini
