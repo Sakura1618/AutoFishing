@@ -91,13 +91,6 @@ class AutoFishWorker:
         self._left_hold_since_ms = 0
         self._max_hold_ms = 260
         self._hold_cooldown_until_ms = 0
-        self._recovery_mode = False
-        self._recovery_inside_frames = 0
-        self._recovery_pulse_state = False
-        self._recovery_pulse_at_ms = 0
-        self._recovery_hold_ms = 45
-        self._recovery_release_ms = 70
-        self._recovery_exit_frames = 3
         self._roi_smooth_alpha = 0.2
         self._roi_jump_px = 6
         self._signal_alpha = 0.35
@@ -217,10 +210,6 @@ class AutoFishWorker:
                 self._left_hold_active = False
                 self._left_hold_since_ms = 0
                 self._hold_cooldown_until_ms = 0
-                self._recovery_mode = False
-                self._recovery_inside_frames = 0
-                self._recovery_pulse_state = False
-                self._recovery_pulse_at_ms = 0
                 self.input_ctl.click_left()
                 self.log_cb(f"cast click (loop={self._loop_id})")
             if out.click_hook:
@@ -249,23 +238,15 @@ class AutoFishWorker:
                     self._last_hold_action = None
                 elif fish_y is not None and zone_y is not None:
                     self._last_mini_signal_ms = now_ms
-                    recovery_action = self._recovery_decide(
+                    conservative = self._mini_template == "fallback-dark" or self._mini_score < 0.58
+                    action = self._mini.decide(
                         fish_y=float(fish_y),
-                        zone_top=det.get("zone_top"),
-                        zone_bottom=det.get("zone_bottom"),
+                        zone_center_y=float(zone_y),
+                        zone_top_y=det.get("zone_top"),
+                        zone_bottom_y=det.get("zone_bottom"),
+                        conservative_mode=conservative,
                         now_ms=now_ms,
                     )
-                    action = recovery_action
-                    if action is None:
-                        conservative = self._mini_template == "fallback-dark" or self._mini_score < 0.58
-                        action = self._mini.decide(
-                            fish_y=float(fish_y),
-                            zone_center_y=float(zone_y),
-                            zone_top_y=det.get("zone_top"),
-                            zone_bottom_y=det.get("zone_bottom"),
-                            conservative_mode=conservative,
-                            now_ms=now_ms,
-                        )
                     if action == HoldAction.HOLD:
                         self._apply_left_hold(True, now_ms=now_ms)
                         if self._last_hold_action != action:
@@ -383,16 +364,6 @@ class AutoFishWorker:
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.5,
                         (80, 200, 255),
-                        1,
-                    )
-                if self._recovery_mode:
-                    cv2.putText(
-                        roi,
-                        "mode:RECOVERY",
-                        (4, 112),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (80, 80, 255),
                         1,
                     )
         return yolo, roi
@@ -538,10 +509,6 @@ class AutoFishWorker:
             self._mini_prev_zone_y = None
             self._mini_drop_start_y = None
             self._apply_left_hold(False, now_ms=now_ms)
-            self._recovery_mode = False
-            self._recovery_inside_frames = 0
-            self._recovery_pulse_state = False
-            self._recovery_pulse_at_ms = 0
         self._last_sm_state = self._sm.state
 
     def _update_minigame_ready(self, zone_y: float | None, now_ms: int) -> bool:
@@ -580,57 +547,6 @@ class AutoFishWorker:
         self._left_hold_active = want_hold
         if want_hold:
             self._left_hold_since_ms = now_ms
-
-    def _recovery_decide(
-        self,
-        fish_y: float,
-        zone_top: float | None,
-        zone_bottom: float | None,
-        now_ms: int,
-    ) -> HoldAction | None:
-        if zone_top is None or zone_bottom is None or zone_bottom <= zone_top:
-            return None
-        top = float(zone_top)
-        bottom = float(zone_bottom)
-        y = float(fish_y)
-        margin = 1.5
-        inside = (top + margin) <= y <= (bottom - margin)
-        if inside:
-            if self._recovery_mode:
-                self._recovery_inside_frames += 1
-                if self._recovery_inside_frames >= self._recovery_exit_frames:
-                    self._recovery_mode = False
-                    self._recovery_inside_frames = 0
-                    self._recovery_pulse_state = False
-                    self._recovery_pulse_at_ms = 0
-                    return HoldAction.KEEP
-                return HoldAction.RELEASE
-            return None
-
-        # fish outside white zone -> recovery mode until it re-enters steadily
-        if not self._recovery_mode:
-            self._recovery_mode = True
-            self._recovery_inside_frames = 0
-            self._recovery_pulse_state = False
-            self._recovery_pulse_at_ms = now_ms
-            self.log_cb("minigame recovery: fish out of white zone")
-
-        self._recovery_inside_frames = 0
-        if y > bottom:
-            # fish below white band: release to let band fall.
-            return HoldAction.RELEASE
-        # fish above white band: pulse hold/release to avoid dead hold on shaking UI.
-        if self._recovery_pulse_state:
-            if now_ms - self._recovery_pulse_at_ms >= self._recovery_hold_ms:
-                self._recovery_pulse_state = False
-                self._recovery_pulse_at_ms = now_ms
-                return HoldAction.RELEASE
-            return HoldAction.HOLD
-        if now_ms - self._recovery_pulse_at_ms >= self._recovery_release_ms:
-            self._recovery_pulse_state = True
-            self._recovery_pulse_at_ms = now_ms
-            return HoldAction.HOLD
-        return HoldAction.RELEASE
 
     def _stabilize_measurements(self, fish_y, zone_y, zone_top, zone_bottom):
         fish_s = self._smooth_signal("fish_y", fish_y)
