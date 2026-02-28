@@ -96,6 +96,12 @@ class AutoFishWorker:
         self._keep_tap_last_ms = 0
         self._keep_tap_active = False
         self._keep_tap_started_ms = 0
+        self._bottom_rescue_margin_px = 2.5
+        self._bottom_rescue_interval_ms = 75
+        self._bottom_rescue_hold_ms = 26
+        self._bottom_rescue_active = False
+        self._bottom_rescue_started_ms = 0
+        self._bottom_rescue_last_ms = 0
         self._roi_smooth_alpha = 0.2
         self._roi_jump_px = 6
         self._signal_alpha = 0.35
@@ -218,6 +224,9 @@ class AutoFishWorker:
                 self._keep_tap_last_ms = 0
                 self._keep_tap_active = False
                 self._keep_tap_started_ms = 0
+                self._bottom_rescue_active = False
+                self._bottom_rescue_started_ms = 0
+                self._bottom_rescue_last_ms = 0
                 self.input_ctl.click_left()
                 self.log_cb(f"cast click (loop={self._loop_id})")
             if out.click_hook:
@@ -244,8 +253,10 @@ class AutoFishWorker:
                 if not ready:
                     self._apply_left_hold(False, now_ms=now_ms)
                     self._reset_keep_tap()
+                    self._reset_bottom_rescue()
                     self._last_hold_action = None
                 elif fish_y is not None and zone_y is not None:
+                    self._reset_bottom_rescue()
                     self._last_mini_signal_ms = now_ms
                     conservative = self._mini_template == "fallback-dark" or self._mini_score < 0.58
                     action = self._mini.decide(
@@ -273,9 +284,14 @@ class AutoFishWorker:
                             self._reset_keep_tap()
                     self._last_hold_action = action
                 elif now_ms - self._last_mini_signal_ms >= self._mini_signal_timeout_ms:
-                    self._apply_left_hold(False, now_ms=now_ms)
+                    if self._zone_near_bottom(det.get("zone_bottom"), det.get("bar_bbox")):
+                        self._apply_bottom_rescue(now_ms=now_ms)
+                        self._last_hold_action = HoldAction.HOLD if self._bottom_rescue_active else HoldAction.RELEASE
+                    else:
+                        self._apply_left_hold(False, now_ms=now_ms)
+                        self._reset_bottom_rescue()
+                        self._last_hold_action = None
                     self._reset_keep_tap()
-                    self._last_hold_action = None
 
             yolo_preview, roi_preview = self._build_previews(frame, det)
             self.preview_cb(yolo_preview, roi_preview)
@@ -527,6 +543,7 @@ class AutoFishWorker:
             self._mini_drop_start_y = None
             self._apply_left_hold(False, now_ms=now_ms)
             self._reset_keep_tap()
+            self._reset_bottom_rescue()
         self._last_sm_state = self._sm.state
 
     def _update_minigame_ready(self, zone_y: float | None, now_ms: int) -> bool:
@@ -588,6 +605,32 @@ class AutoFishWorker:
 
     def _reset_keep_tap(self) -> None:
         self._keep_tap_active = False
+
+    @staticmethod
+    def _zone_near_bottom(zone_bottom: float | None, bar_bbox) -> bool:
+        if zone_bottom is None or bar_bbox is None:
+            return False
+        try:
+            bottom_limit = float(bar_bbox[3])
+            zb = float(zone_bottom)
+        except Exception:
+            return False
+        return (bottom_limit - zb) <= 2.5
+
+    def _apply_bottom_rescue(self, now_ms: int) -> None:
+        if self._bottom_rescue_active:
+            if now_ms - self._bottom_rescue_started_ms >= self._bottom_rescue_hold_ms:
+                self._apply_left_hold(False, now_ms=now_ms)
+                self._bottom_rescue_active = False
+                self._bottom_rescue_last_ms = now_ms
+            return
+        if now_ms - self._bottom_rescue_last_ms >= self._bottom_rescue_interval_ms:
+            self._apply_left_hold(True, now_ms=now_ms)
+            self._bottom_rescue_active = True
+            self._bottom_rescue_started_ms = now_ms
+
+    def _reset_bottom_rescue(self) -> None:
+        self._bottom_rescue_active = False
 
     def _stabilize_measurements(self, fish_y, zone_y, zone_top, zone_bottom):
         fish_s = self._smooth_signal("fish_y", fish_y)

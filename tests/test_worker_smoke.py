@@ -181,3 +181,25 @@ def test_keep_tap_generates_short_hold_pulse():
 def test_fish_inside_white_zone_check():
     assert AutoFishWorker._fish_inside_white_zone(100.0, 90.0, 110.0) is True
     assert AutoFishWorker._fish_inside_white_zone(89.0, 90.0, 110.0) is False
+
+
+def test_zone_near_bottom_check():
+    assert AutoFishWorker._zone_near_bottom(198.2, (0, 100, 20, 200)) is True
+    assert AutoFishWorker._zone_near_bottom(194.0, (0, 100, 20, 200)) is False
+
+
+def test_bottom_rescue_generates_short_hold():
+    fake_in = FakeInput()
+    worker = AutoFishWorker(
+        cfg=AutoFishConfig(loop_fps=10),
+        detector=FakeDetector(),
+        capture=FakeCapture(),
+        input_ctl=fake_in,
+        log_cb=lambda _x: None,
+    )
+    worker._bottom_rescue_interval_ms = 50
+    worker._bottom_rescue_hold_ms = 20
+    worker._apply_bottom_rescue(now_ms=1000)
+    worker._apply_bottom_rescue(now_ms=1025)
+    assert fake_in.hold_states[0] is True
+    assert fake_in.hold_states[-1] is False
