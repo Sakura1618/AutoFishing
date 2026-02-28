@@ -182,7 +182,7 @@ class AutoFishWorker:
                 fish_y = det.get("fish_y")
                 zone_y = det.get("zone_y")
                 if fish_y is not None and zone_y is not None:
-                    action = self._mini.decide(fish_y=float(fish_y), zone_center_y=float(zone_y))
+                    action = self._mini.decide(fish_y=float(fish_y), zone_center_y=float(zone_y), now_ms=now_ms)
                     if action == HoldAction.HOLD:
                         if hasattr(self.input_ctl, "set_left_hold"):
                             self.input_ctl.set_left_hold(True)
@@ -254,6 +254,15 @@ class AutoFishWorker:
                     0.55,
                     action_color,
                     2,
+                )
+                cv2.putText(
+                    roi,
+                    f"ctl:{self._mini.last_control:+.1f}",
+                    (4, 58),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (120, 220, 255),
+                    1,
                 )
         return yolo, roi
 

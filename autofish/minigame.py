@@ -30,19 +30,78 @@ class TemplatePack:
 
 
 class MinigameController:
-    def __init__(self, dead_zone_px: float = 4.0) -> None:
+    def __init__(
+        self,
+        dead_zone_px: float = 4.0,
+        kp: float = 1.0,
+        kd: float = 0.75,
+        duration_scale_px: float = 28.0,
+        min_hold_ms: int = 45,
+        max_hold_ms: int = 180,
+        min_release_ms: int = 40,
+        max_release_ms: int = 160,
+    ) -> None:
         self.dead_zone_px = dead_zone_px
+        self.kp = kp
+        self.kd = kd
+        self.duration_scale_px = max(1.0, duration_scale_px)
+        self.min_hold_ms = min_hold_ms
+        self.max_hold_ms = max(max_hold_ms, min_hold_ms)
+        self.min_release_ms = min_release_ms
+        self.max_release_ms = max(max_release_ms, min_release_ms)
         self._last = HoldAction.RELEASE
+        self._pressed = False
+        self._last_error: float | None = None
+        self._last_ts_ms: int | None = None
+        self._switch_allowed_at_ms: int = 0
+        self.last_control: float = 0.0
 
-    def decide(self, fish_y: float, zone_center_y: float) -> HoldAction:
-        delta = fish_y - zone_center_y
-        if delta < -self.dead_zone_px:
-            self._last = HoldAction.HOLD
-            return HoldAction.HOLD
-        if delta > self.dead_zone_px:
-            self._last = HoldAction.RELEASE
-            return HoldAction.RELEASE
+    def decide(self, fish_y: float, zone_center_y: float, now_ms: int | None = None) -> HoldAction:
+        if now_ms is None:
+            now_ms = int(cv2.getTickCount() * 1000 / cv2.getTickFrequency())
+        first_sample = self._last_ts_ms is None
+        error = zone_center_y - fish_y
+        d_error = 0.0
+        if self._last_error is not None and self._last_ts_ms is not None:
+            dt = max(1.0, float(now_ms - self._last_ts_ms))
+            d_error = (error - self._last_error) / dt * 16.0
+        control = self.kp * error + self.kd * d_error
+        self.last_control = float(control)
+        self._last_error = float(error)
+        self._last_ts_ms = now_ms
+
+        if control > self.dead_zone_px:
+            want_hold = True
+        elif control < -self.dead_zone_px:
+            want_hold = False
+        else:
+            want_hold = self._pressed
+
+        # Keep legacy behavior on first evaluated frame: emit explicit action when signal is strong.
+        if first_sample:
+            if want_hold and not self._pressed:
+                self._pressed = True
+                self._switch_allowed_at_ms = now_ms + self._next_lock_ms(control=control, for_hold=True)
+                self._last = HoldAction.HOLD
+                return HoldAction.HOLD
+            if (not want_hold) and control < -self.dead_zone_px:
+                self._pressed = False
+                self._switch_allowed_at_ms = now_ms + self._next_lock_ms(control=control, for_hold=False)
+                self._last = HoldAction.RELEASE
+                return HoldAction.RELEASE
+
+        if want_hold != self._pressed and now_ms >= self._switch_allowed_at_ms:
+            self._pressed = want_hold
+            self._switch_allowed_at_ms = now_ms + self._next_lock_ms(control=control, for_hold=want_hold)
+            self._last = HoldAction.HOLD if want_hold else HoldAction.RELEASE
+            return self._last
         return HoldAction.KEEP
+
+    def _next_lock_ms(self, control: float, for_hold: bool) -> int:
+        strength = min(1.0, abs(control) / self.duration_scale_px)
+        if for_hold:
+            return int(round(self.min_hold_ms + (self.max_hold_ms - self.min_hold_ms) * strength))
+        return int(round(self.min_release_ms + (self.max_release_ms - self.min_release_ms) * strength))
 
 
 class FishTemplateMatcher:
