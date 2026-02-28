@@ -264,6 +264,15 @@ class AutoFishWorker:
                     (120, 220, 255),
                     1,
                 )
+                cv2.putText(
+                    roi,
+                    f"mode:{self._mini.last_mode}",
+                    (4, 76),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (120, 255, 160),
+                    1,
+                )
         return yolo, roi
 
     @staticmethod

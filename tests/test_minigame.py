@@ -34,3 +34,36 @@ def test_does_not_flip_immediately_on_reverse_signal():
     assert a1 == HoldAction.HOLD
     assert a2 == HoldAction.KEEP
     assert a3 == HoldAction.RELEASE
+
+
+def test_prediction_can_pre_brake_before_crossing_zone():
+    ctrl = MinigameController(
+        dead_zone_px=4,
+        far_px=10_000,
+        min_hold_ms=0,
+        max_hold_ms=0,
+        min_release_ms=0,
+        max_release_ms=0,
+        predict_ms=200,
+    )
+    a1 = ctrl.decide(fish_y=80.0, zone_center_y=100.0, now_ms=0)
+    # Fish still above zone, but moving down fast. Prediction should pre-brake to RELEASE.
+    a2 = ctrl.decide(fish_y=95.0, zone_center_y=100.0, now_ms=16)
+    assert a1 == HoldAction.HOLD
+    assert a2 == HoldAction.RELEASE
+
+
+def test_far_error_enters_catchup_and_switches_direction():
+    ctrl = MinigameController(
+        dead_zone_px=4,
+        far_px=25,
+        near_px=12,
+        min_hold_ms=0,
+        max_hold_ms=0,
+        min_release_ms=0,
+        max_release_ms=0,
+    )
+    a1 = ctrl.decide(fish_y=140.0, zone_center_y=100.0, now_ms=0)
+    a2 = ctrl.decide(fish_y=60.0, zone_center_y=100.0, now_ms=16)
+    assert a1 == HoldAction.RELEASE
+    assert a2 == HoldAction.HOLD

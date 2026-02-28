@@ -15,6 +15,12 @@ class HoldAction(str, Enum):
     KEEP = "keep"
 
 
+class TrackMode(str, Enum):
+    TRACK = "track"
+    CATCHUP = "catchup"
+    BRAKE = "brake"
+
+
 @dataclass(slots=True)
 class MatchHit:
     fish_y: float
@@ -35,6 +41,14 @@ class MinigameController:
         dead_zone_px: float = 4.0,
         kp: float = 1.0,
         kd: float = 0.75,
+        far_px: float = 24.0,
+        near_px: float = 12.0,
+        predict_ms: int = 120,
+        fish_vel_alpha: float = 0.35,
+        zone_vel_alpha: float = 0.35,
+        brake_window_px: float = 20.0,
+        brake_base_px: float = 3.0,
+        brake_speed_gain: float = 0.08,
         duration_scale_px: float = 28.0,
         min_hold_ms: int = 45,
         max_hold_ms: int = 180,
@@ -44,6 +58,14 @@ class MinigameController:
         self.dead_zone_px = dead_zone_px
         self.kp = kp
         self.kd = kd
+        self.far_px = max(0.0, far_px)
+        self.near_px = max(0.0, min(near_px, far_px))
+        self.predict_s = max(0.0, predict_ms / 1000.0)
+        self.fish_vel_alpha = min(1.0, max(0.0, fish_vel_alpha))
+        self.zone_vel_alpha = min(1.0, max(0.0, zone_vel_alpha))
+        self.brake_window_px = max(0.0, brake_window_px)
+        self.brake_base_px = max(0.0, brake_base_px)
+        self.brake_speed_gain = max(0.0, brake_speed_gain)
         self.duration_scale_px = max(1.0, duration_scale_px)
         self.min_hold_ms = min_hold_ms
         self.max_hold_ms = max(max_hold_ms, min_hold_ms)
@@ -53,42 +75,68 @@ class MinigameController:
         self._pressed = False
         self._last_error: float | None = None
         self._last_ts_ms: int | None = None
+        self._last_fish_y: float | None = None
+        self._last_zone_y: float | None = None
+        self._fish_vel_ema: float = 0.0
+        self._zone_vel_ema: float = 0.0
+        self._mode = TrackMode.TRACK
         self._switch_allowed_at_ms: int = 0
         self.last_control: float = 0.0
+        self.last_mode: str = self._mode.value
+        self.last_pred_fish_y: float | None = None
 
     def decide(self, fish_y: float, zone_center_y: float, now_ms: int | None = None) -> HoldAction:
         if now_ms is None:
             now_ms = int(cv2.getTickCount() * 1000 / cv2.getTickFrequency())
         first_sample = self._last_ts_ms is None
-        error = zone_center_y - fish_y
-        d_error = 0.0
-        if self._last_error is not None and self._last_ts_ms is not None:
-            dt = max(1.0, float(now_ms - self._last_ts_ms))
-            d_error = (error - self._last_error) / dt * 16.0
+        dt_s = 0.0
+        if self._last_ts_ms is not None:
+            dt_s = max(0.001, (now_ms - self._last_ts_ms) / 1000.0)
+            fish_v = (fish_y - float(self._last_fish_y)) / dt_s if self._last_fish_y is not None else 0.0
+            zone_v = (zone_center_y - float(self._last_zone_y)) / dt_s if self._last_zone_y is not None else 0.0
+            self._fish_vel_ema = (1.0 - self.fish_vel_alpha) * self._fish_vel_ema + self.fish_vel_alpha * fish_v
+            self._zone_vel_ema = (1.0 - self.zone_vel_alpha) * self._zone_vel_ema + self.zone_vel_alpha * zone_v
+        fish_pred = fish_y + self._fish_vel_ema * self.predict_s
+        error = zone_center_y - fish_pred
+        d_error = 0.0 if self._last_error is None else (error - self._last_error)
         control = self.kp * error + self.kd * d_error
         self.last_control = float(control)
+        self.last_pred_fish_y = float(fish_pred)
+
+        if abs(error) >= self.far_px:
+            self._mode = TrackMode.CATCHUP
+        elif self._mode == TrackMode.CATCHUP and abs(error) > self.near_px:
+            self._mode = TrackMode.CATCHUP
+        else:
+            self._mode = TrackMode.TRACK
+
+        want_hold = self._pressed
+        if self._mode == TrackMode.CATCHUP:
+            want_hold = error > 0
+        else:
+            if self._pressed:
+                want_hold = not self._should_pre_brake_hold(error)
+                if error < -self.dead_zone_px:
+                    want_hold = False
+            else:
+                want_hold = self._should_pre_brake_release(error)
+                if error > self.dead_zone_px:
+                    want_hold = True
+
+        if self._mode == TrackMode.TRACK and want_hold != self._pressed:
+            self._mode = TrackMode.BRAKE
+
+        self.last_mode = self._mode.value
         self._last_error = float(error)
         self._last_ts_ms = now_ms
+        self._last_fish_y = float(fish_y)
+        self._last_zone_y = float(zone_center_y)
 
-        if control > self.dead_zone_px:
-            want_hold = True
-        elif control < -self.dead_zone_px:
-            want_hold = False
-        else:
-            want_hold = self._pressed
-
-        # Keep legacy behavior on first evaluated frame: emit explicit action when signal is strong.
         if first_sample:
-            if want_hold and not self._pressed:
-                self._pressed = True
-                self._switch_allowed_at_ms = now_ms + self._next_lock_ms(control=control, for_hold=True)
-                self._last = HoldAction.HOLD
-                return HoldAction.HOLD
-            if (not want_hold) and control < -self.dead_zone_px:
-                self._pressed = False
-                self._switch_allowed_at_ms = now_ms + self._next_lock_ms(control=control, for_hold=False)
-                self._last = HoldAction.RELEASE
-                return HoldAction.RELEASE
+            self._pressed = want_hold
+            self._switch_allowed_at_ms = now_ms + self._next_lock_ms(control=control, for_hold=want_hold)
+            self._last = HoldAction.HOLD if want_hold else HoldAction.RELEASE
+            return self._last
 
         if want_hold != self._pressed and now_ms >= self._switch_allowed_at_ms:
             self._pressed = want_hold
@@ -102,6 +150,20 @@ class MinigameController:
         if for_hold:
             return int(round(self.min_hold_ms + (self.max_hold_ms - self.min_hold_ms) * strength))
         return int(round(self.min_release_ms + (self.max_release_ms - self.min_release_ms) * strength))
+
+    def _should_pre_brake_hold(self, error: float) -> bool:
+        if abs(error) > self.brake_window_px:
+            return False
+        up_speed = max(0.0, -self._zone_vel_ema)
+        threshold = self.brake_base_px + self.brake_speed_gain * up_speed
+        return error <= threshold
+
+    def _should_pre_brake_release(self, error: float) -> bool:
+        if abs(error) > self.brake_window_px:
+            return False
+        down_speed = max(0.0, self._zone_vel_ema)
+        threshold = self.brake_base_px + self.brake_speed_gain * down_speed
+        return error >= -threshold
 
 
 class FishTemplateMatcher:
