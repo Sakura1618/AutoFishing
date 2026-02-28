@@ -5,11 +5,11 @@ import time
 from typing import Callable
 
 import cv2
+from pathlib import Path
 
 from .config import AutoFishConfig
-from .minigame import HoldAction, MinigameController
+from .minigame import FishTemplateMatcher, HoldAction, MinigameController, estimate_white_zone_center
 from .state_machine import AutoFishState, FishingStateMachine
-from .vision import estimate_fish_and_zone
 from .win32_api import VK_S, VK_W
 
 
@@ -40,6 +40,15 @@ class AutoFishWorker:
             success_disappear_ms=cfg.success_disappear_ms,
         )
         self._mini = MinigameController()
+        try:
+            self._matcher = FishTemplateMatcher.from_template_dir(
+                Path.cwd() / "img",
+                threshold=0.55,
+                scales=(0.9, 1.0, 1.1),
+                lost_hold_ms=300,
+            )
+        except Exception:
+            self._matcher = None
         self._tick_count = 0
         self._last_det = {"has_bite": False, "has_bar": False, "bar_bbox": None, "fish_y": None, "zone_y": None, "boxes": []}
         self._last_infer_ts = 0.0
@@ -50,6 +59,8 @@ class AutoFishWorker:
         self._yolo1_id = 0
         self._await_next_yolo1 = False
         self._roi_anchor_bbox = None
+        self._mini_score = 0.0
+        self._mini_template = ""
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -90,6 +101,7 @@ class AutoFishWorker:
                 self._last_infer_ts = now
             else:
                 det = self._last_det
+            now_ms = int(time.time() * 1000)
             det = dict(det)
             det["origin"] = frame_origin
             raw_boxes = det.get("boxes", [])
@@ -110,7 +122,7 @@ class AutoFishWorker:
                 for b in annotated_boxes
             ]
             selected_bar = self._select_bar_bbox(annotated_boxes)
-            fish_y, zone_y = estimate_fish_and_zone(frame, selected_bar)
+            fish_y, zone_y = self._analyze_minigame_roi(frame, selected_bar, now_ms)
             det["bar_bbox"] = selected_bar
             det["has_bar"] = selected_bar is not None
             det["fish_y"] = fish_y
@@ -128,13 +140,13 @@ class AutoFishWorker:
                         f"has_bar={bool(det.get('has_bar'))}, fish_y={det.get('fish_y')}, zone_y={det.get('zone_y')}, "
                         f"origin={frame_origin}"
                     )
+                    self.log_cb(f"diag: mini score={self._mini_score:.3f}, template={self._mini_template}")
                     self.log_cb(
                         f"diag: yolo_hits_2s bite={self._bite_hits}, bar={self._bar_hits}, "
                         f"conf0={self.cfg.conf_yolo0:.2f}, conf1={self.cfg.conf_yolo1:.2f}, imgsz={self.cfg.imgsz}"
                     )
                     self._bite_hits = 0
                     self._bar_hits = 0
-            now_ms = int(time.time() * 1000)
             out = self._sm.tick(now_ms=now_ms, has_bite=bool(det.get("has_bite")), has_bar=bool(det.get("has_bar")))
             self.status_cb(self._sm.state.value)
 
@@ -215,6 +227,15 @@ class AutoFishWorker:
                 if zone_y is not None:
                     zy = int(float(zone_y) - y1)
                     cv2.line(roi, (0, zy), (roi.shape[1] - 1, zy), (255, 255, 255), 2)
+                cv2.putText(
+                    roi,
+                    f"score:{self._mini_score:.2f} {self._mini_template}",
+                    (4, 18),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (255, 220, 0),
+                    1,
+                )
         return yolo, roi
 
     @staticmethod
@@ -276,3 +297,29 @@ class AutoFishWorker:
         area_b = max(1, (bx2 - bx1) * (by2 - by1))
         union = area_a + area_b - inter
         return float(inter / max(1, union))
+
+    def _analyze_minigame_roi(self, frame, bar_bbox, now_ms: int):
+        self._mini_score = 0.0
+        self._mini_template = ""
+        if frame is None or bar_bbox is None:
+            return None, None
+        x1, y1, x2, y2 = bar_bbox
+        h, w = frame.shape[:2]
+        x1 = max(0, min(x1, w - 1))
+        x2 = max(0, min(x2, w))
+        y1 = max(0, min(y1, h - 1))
+        y2 = max(0, min(y2, h))
+        if x2 <= x1 or y2 <= y1:
+            return None, None
+        roi = frame[y1:y2, x1:x2]
+        if self._matcher is None:
+            return None, None
+        zone_local = estimate_white_zone_center(roi)
+        hit = self._matcher.locate(roi, now_ms=now_ms)
+        fish_y = None
+        if hit is not None:
+            fish_y = y1 + hit.fish_y
+            self._mini_score = hit.score
+            self._mini_template = hit.template_name
+        zone_y = None if zone_local is None else y1 + zone_local
+        return fish_y, zone_y

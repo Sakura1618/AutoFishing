@@ -35,5 +35,8 @@ powershell -ExecutionPolicy Bypass -File "D:\Repositories\AutoFishing\run_autofi
 - Capture backend:
   - Prefer `windows-capture` (window-only content)
   - Fallback to `PrintWindow` client-area crop
+- Minigame OpenCV logic:
+  - Uses fish contour template matching from `D:\Repositories\AutoFishing\img`
+  - Tracks fish icon center and white-zone center for hold/release control
 - `yolo_train` remains dedicated to manual model training only.
 - Default fishing sequence follows `自动钓鱼.txt`.
