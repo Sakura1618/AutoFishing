@@ -59,8 +59,10 @@ class AutoFishWorker:
         self._yolo1_id = 0
         self._await_next_yolo1 = False
         self._roi_anchor_bbox = None
+        self._roi_anchor_last_seen_ms = 0
         self._mini_score = 0.0
         self._mini_template = ""
+        self._last_hold_action: HoldAction | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -156,6 +158,7 @@ class AutoFishWorker:
                 self._yolo1_id = 0
                 self._await_next_yolo1 = False
                 self._roi_anchor_bbox = None
+                self._roi_anchor_last_seen_ms = 0
                 self.input_ctl.click_left()
                 self.log_cb(f"cast click (loop={self._loop_id})")
             if out.click_hook:
@@ -183,9 +186,14 @@ class AutoFishWorker:
                     if action == HoldAction.HOLD:
                         if hasattr(self.input_ctl, "set_left_hold"):
                             self.input_ctl.set_left_hold(True)
+                        if self._last_hold_action != action:
+                            self.log_cb("minigame action: HOLD")
                     elif action == HoldAction.RELEASE:
                         if hasattr(self.input_ctl, "set_left_hold"):
                             self.input_ctl.set_left_hold(False)
+                        if self._last_hold_action != action:
+                            self.log_cb("minigame action: RELEASE")
+                    self._last_hold_action = action
 
             yolo_preview, roi_preview = self._build_previews(frame, det)
             self.preview_cb(yolo_preview, roi_preview)
@@ -269,17 +277,24 @@ class AutoFishWorker:
         if self._sm.state == AutoFishState.WAIT_BITE:
             if self._await_next_yolo1 and class1:
                 self._roi_anchor_bbox = class1[0]["bbox"]
+                self._roi_anchor_last_seen_ms = int(time.time() * 1000)
                 self._await_next_yolo1 = False
                 return self._roi_anchor_bbox
             return None
         if self._sm.state == AutoFishState.MINIGAME:
+            now_ms = int(time.time() * 1000)
             if not class1:
+                # Keep using locked ROI for a while when yolo:1 flickers.
+                if self._roi_anchor_bbox is not None and now_ms - self._roi_anchor_last_seen_ms <= 1500:
+                    return self._roi_anchor_bbox
                 return None
             if self._roi_anchor_bbox is None:
                 self._roi_anchor_bbox = class1[0]["bbox"]
+                self._roi_anchor_last_seen_ms = now_ms
                 return self._roi_anchor_bbox
             best = max(class1, key=lambda b: self._bbox_iou(self._roi_anchor_bbox, b["bbox"]))
             self._roi_anchor_bbox = best["bbox"]
+            self._roi_anchor_last_seen_ms = now_ms
             return self._roi_anchor_bbox
         return None
 
@@ -321,5 +336,14 @@ class AutoFishWorker:
             fish_y = y1 + hit.fish_y
             self._mini_score = hit.score
             self._mini_template = hit.template_name
+        else:
+            # Fallback: darkest blob center in ROI, keeps control alive when template misses.
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            blur = cv2.GaussianBlur(gray, (5, 5), 0)
+            min_val, _, min_loc, _ = cv2.minMaxLoc(blur)
+            if min_val < 160:
+                fish_y = y1 + float(min_loc[1])
+                self._mini_score = 0.0
+                self._mini_template = "fallback-dark"
         zone_y = None if zone_local is None else y1 + zone_local
         return fish_y, zone_y

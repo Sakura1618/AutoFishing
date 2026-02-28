@@ -1,4 +1,5 @@
 from autofish.config import AutoFishConfig
+from autofish.state_machine import AutoFishState
 from autofish.worker import AutoFishWorker
 
 
@@ -45,3 +46,22 @@ def test_worker_normalize_capture_result_tuple():
 def test_bbox_iou_for_overlap():
     iou = AutoFishWorker._bbox_iou((0, 0, 10, 10), (5, 5, 15, 15))
     assert iou > 0
+
+
+def test_keep_roi_anchor_when_class1_flickers():
+    worker = AutoFishWorker(
+        cfg=AutoFishConfig(loop_fps=10),
+        detector=FakeDetector(),
+        capture=FakeCapture(),
+        input_ctl=FakeInput(),
+        log_cb=lambda _x: None,
+    )
+    worker._sm.state = AutoFishState.MINIGAME
+    worker._roi_anchor_bbox = (10, 20, 30, 60)
+    worker._roi_anchor_last_seen_ms = 10_000
+    # simulate within hold window (<=1500ms)
+    import time
+    now_ms = int(time.time() * 1000)
+    worker._roi_anchor_last_seen_ms = now_ms - 500
+    got = worker._select_bar_bbox([])
+    assert got == (10, 20, 30, 60)
