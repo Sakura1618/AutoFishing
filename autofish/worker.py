@@ -257,11 +257,13 @@ class AutoFishWorker:
                     )
                     action = recovery_action
                     if action is None:
+                        conservative = self._mini_template == "fallback-dark" or self._mini_score < 0.58
                         action = self._mini.decide(
                             fish_y=float(fish_y),
                             zone_center_y=float(zone_y),
                             zone_top_y=det.get("zone_top"),
                             zone_bottom_y=det.get("zone_bottom"),
+                            conservative_mode=conservative,
                             now_ms=now_ms,
                         )
                     if action == HoldAction.HOLD:

@@ -146,3 +146,33 @@ def test_edge_guard_cooldown_avoids_rapid_flip():
     assert a1 == HoldAction.RELEASE
     assert a2 == HoldAction.KEEP
     assert a3 == HoldAction.HOLD
+
+
+def test_hold_direction_can_be_flipped_by_axis_setting():
+    ctrl = MinigameController(
+        hold_decreases_y=False,
+        far_px=10_000,
+        min_hold_ms=0,
+        max_hold_ms=0,
+        min_release_ms=0,
+        max_release_ms=0,
+    )
+    # hold makes bar go down in this mode, so fish below target should HOLD.
+    a1 = ctrl.decide(fish_y=120.0, zone_center_y=100.0, now_ms=0)
+    assert a1 == HoldAction.HOLD
+
+
+def test_dead_zone_is_capped_for_tall_bar():
+    ctrl = MinigameController(
+        dead_zone_px=4,
+        dead_zone_ratio=0.10,
+        dead_zone_cap_px=7.0,
+        far_px=10_000,
+        min_hold_ms=0,
+        max_hold_ms=0,
+        min_release_ms=0,
+        max_release_ms=0,
+    )
+    # height=200 would produce 20px with ratio, but capped to 7px, so this should trigger HOLD.
+    a1 = ctrl.decide(fish_y=92.5, zone_center_y=100.0, zone_top_y=0.0, zone_bottom_y=200.0, now_ms=0)
+    assert a1 == HoldAction.HOLD
