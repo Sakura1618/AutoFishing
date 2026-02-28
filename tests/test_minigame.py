@@ -92,8 +92,10 @@ def test_controller_uses_zone_edges_as_guardrails():
     )
     a1 = ctrl.decide(fish_y=89.0, zone_center_y=100.0, zone_top_y=90.0, zone_bottom_y=110.0, now_ms=0)
     a2 = ctrl.decide(fish_y=111.0, zone_center_y=100.0, zone_top_y=90.0, zone_bottom_y=110.0, now_ms=16)
+    a3 = ctrl.decide(fish_y=111.0, zone_center_y=100.0, zone_top_y=90.0, zone_bottom_y=110.0, now_ms=120)
     assert a1 == HoldAction.RELEASE
-    assert a2 == HoldAction.HOLD
+    assert a2 == HoldAction.KEEP
+    assert a3 == HoldAction.HOLD
 
 
 def test_edge_guard_forces_release_near_top():
@@ -126,3 +128,21 @@ def test_target_bias_shifts_center_decision():
     # Without bias this is exactly centered, with positive bias target moves down so should HOLD.
     a1 = ctrl.decide(fish_y=100.0, zone_center_y=100.0, zone_top_y=90.0, zone_bottom_y=110.0, now_ms=0)
     assert a1 == HoldAction.HOLD
+
+
+def test_edge_guard_cooldown_avoids_rapid_flip():
+    ctrl = MinigameController(
+        edge_guard_px=3.5,
+        edge_guard_cooldown_ms=80,
+        min_hold_ms=0,
+        max_hold_ms=0,
+        min_release_ms=0,
+        max_release_ms=0,
+        far_px=10_000,
+    )
+    a1 = ctrl.decide(fish_y=92.0, zone_center_y=100.0, zone_top_y=90.0, zone_bottom_y=110.0, now_ms=0)
+    a2 = ctrl.decide(fish_y=108.5, zone_center_y=100.0, zone_top_y=90.0, zone_bottom_y=110.0, now_ms=20)
+    a3 = ctrl.decide(fish_y=108.5, zone_center_y=100.0, zone_top_y=90.0, zone_bottom_y=110.0, now_ms=120)
+    assert a1 == HoldAction.RELEASE
+    assert a2 == HoldAction.KEEP
+    assert a3 == HoldAction.HOLD

@@ -59,11 +59,12 @@ class MinigameController:
         brake_speed_gain: float = 0.08,
         target_bias_px: float = 0.0,
         edge_guard_px: float = 3.5,
+        edge_guard_cooldown_ms: int = 80,
         duration_scale_px: float = 28.0,
         hold_time_factor: float = 0.65,
-        min_hold_ms: int = 45,
+        min_hold_ms: int = 80,
         max_hold_ms: int = 180,
-        min_release_ms: int = 40,
+        min_release_ms: int = 80,
         max_release_ms: int = 160,
     ) -> None:
         self.dead_zone_px = dead_zone_px
@@ -79,6 +80,7 @@ class MinigameController:
         self.brake_speed_gain = max(0.0, brake_speed_gain)
         self.target_bias_px = float(target_bias_px)
         self.edge_guard_px = max(0.0, edge_guard_px)
+        self.edge_guard_cooldown_ms = max(0, edge_guard_cooldown_ms)
         self.duration_scale_px = max(1.0, duration_scale_px)
         self.hold_time_factor = min(1.0, max(0.2, hold_time_factor))
         self.min_hold_ms = min_hold_ms
@@ -95,6 +97,7 @@ class MinigameController:
         self._zone_vel_ema: float = 0.0
         self._mode = TrackMode.TRACK
         self._switch_allowed_at_ms: int = 0
+        self._edge_guard_cooldown_until_ms: int = 0
         self.last_control: float = 0.0
         self.last_mode: str = self._mode.value
         self.last_pred_fish_y: float | None = None
@@ -125,7 +128,7 @@ class MinigameController:
         if zone_top_y is not None and zone_bottom_y is not None and zone_bottom_y > zone_top_y:
             zone_target = min(max(zone_target, zone_top_y), zone_bottom_y)
             height = max(1.0, zone_bottom_y - zone_top_y)
-            edge_dead_zone = max(self.dead_zone_px, height * 0.2)
+            edge_dead_zone = max(self.dead_zone_px, height * 0.25)
             error = zone_target - fish_pred
             dist_to_top = fish_pred - zone_top_y
             dist_to_bottom = zone_bottom_y - fish_pred
@@ -133,6 +136,8 @@ class MinigameController:
                 force_action = HoldAction.RELEASE
             elif dist_to_bottom <= self.edge_guard_px:
                 force_action = HoldAction.HOLD
+        if now_ms < self._edge_guard_cooldown_until_ms:
+            force_action = None
         d_error = 0.0 if self._last_error is None else (error - self._last_error)
         control = self.kp * error + self.kd * d_error
         self.last_control = float(control)
@@ -173,13 +178,19 @@ class MinigameController:
         if first_sample:
             self._pressed = want_hold
             self._switch_allowed_at_ms = now_ms + self._next_lock_ms(control=control, for_hold=want_hold)
+            if force_action is not None:
+                self._edge_guard_cooldown_until_ms = now_ms + self.edge_guard_cooldown_ms
             self._last = HoldAction.HOLD if want_hold else HoldAction.RELEASE
             return self._last
+
+        if now_ms < self._edge_guard_cooldown_until_ms and want_hold != self._pressed:
+            return HoldAction.KEEP
 
         if force_action is not None and want_hold != self._pressed:
             # Emergency edge guard: switch immediately and enforce minimal hold/release time.
             self._pressed = want_hold
             self._switch_allowed_at_ms = now_ms + self._next_lock_ms(control=control, for_hold=want_hold)
+            self._edge_guard_cooldown_until_ms = now_ms + self.edge_guard_cooldown_ms
             self._last = HoldAction.HOLD if want_hold else HoldAction.RELEASE
             return self._last
 

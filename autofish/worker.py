@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from typing import Callable
 
 import cv2
@@ -77,6 +78,16 @@ class AutoFishWorker:
         self._loop_stat_count = 0
         self._infer_stat_count = 0
         self._stat_last_ts = time.time()
+        self._roi_smooth_alpha = 0.2
+        self._roi_jump_px = 6
+        self._signal_alpha = 0.35
+        self._signal_jump_px = 15.0
+        self._smooth_values: dict[str, float] = {}
+        self._signal_hist: dict[str, deque[float]] = {
+            "fish_y": deque(maxlen=3),
+            "zone_top": deque(maxlen=3),
+            "zone_bottom": deque(maxlen=3),
+        }
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -141,6 +152,7 @@ class AutoFishWorker:
             ]
             selected_bar = self._select_bar_bbox(annotated_boxes)
             fish_y, zone_y, zone_top, zone_bottom = self._analyze_minigame_roi(frame, selected_bar, now_ms)
+            fish_y, zone_y, zone_top, zone_bottom = self._stabilize_measurements(fish_y, zone_y, zone_top, zone_bottom)
             det["bar_bbox"] = selected_bar
             det["has_bar"] = selected_bar is not None
             det["fish_y"] = fish_y
@@ -177,6 +189,9 @@ class AutoFishWorker:
                 self._await_next_yolo1 = False
                 self._roi_anchor_bbox = None
                 self._roi_anchor_last_seen_ms = 0
+                self._smooth_values.clear()
+                for hist in self._signal_hist.values():
+                    hist.clear()
                 self.input_ctl.click_left()
                 self.log_cb(f"cast click (loop={self._loop_id})")
             if out.click_hook:
@@ -347,8 +362,8 @@ class AutoFishWorker:
         class1 = [b for b in boxes if int(b.get("cls", -1)) == 1]
         if self._sm.state == AutoFishState.WAIT_BITE:
             if self._await_next_yolo1 and class1:
-                self._roi_anchor_bbox = class1[0]["bbox"]
-                self._roi_anchor_last_seen_ms = int(time.time() * 1000)
+                now_ms = int(time.time() * 1000)
+                self._update_roi_anchor(class1[0]["bbox"], now_ms=now_ms)
                 self._await_next_yolo1 = False
                 return self._roi_anchor_bbox
             return None
@@ -360,14 +375,34 @@ class AutoFishWorker:
                     return self._roi_anchor_bbox
                 return None
             if self._roi_anchor_bbox is None:
-                self._roi_anchor_bbox = class1[0]["bbox"]
-                self._roi_anchor_last_seen_ms = now_ms
+                self._update_roi_anchor(class1[0]["bbox"], now_ms=now_ms)
                 return self._roi_anchor_bbox
             best = max(class1, key=lambda b: self._bbox_iou(self._roi_anchor_bbox, b["bbox"]))
-            self._roi_anchor_bbox = best["bbox"]
-            self._roi_anchor_last_seen_ms = now_ms
+            self._update_roi_anchor(best["bbox"], now_ms=now_ms)
             return self._roi_anchor_bbox
         return None
+
+    def _update_roi_anchor(self, new_bbox, now_ms: int) -> None:
+        if self._roi_anchor_bbox is None:
+            self._roi_anchor_bbox = new_bbox
+            self._roi_anchor_last_seen_ms = now_ms
+            return
+        ox1, oy1, ox2, oy2 = self._roi_anchor_bbox
+        nx1, ny1, nx2, ny2 = new_bbox
+        old_cx = (ox1 + ox2) * 0.5
+        old_cy = (oy1 + oy2) * 0.5
+        new_cx = (nx1 + nx2) * 0.5
+        new_cy = (ny1 + ny2) * 0.5
+        if abs(new_cx - old_cx) <= self._roi_jump_px and abs(new_cy - old_cy) <= self._roi_jump_px:
+            self._roi_anchor_last_seen_ms = now_ms
+            return
+        a = self._roi_smooth_alpha
+        sx1 = int(round(ox1 * (1.0 - a) + nx1 * a))
+        sy1 = int(round(oy1 * (1.0 - a) + ny1 * a))
+        sx2 = int(round(ox2 * (1.0 - a) + nx2 * a))
+        sy2 = int(round(oy2 * (1.0 - a) + ny2 * a))
+        self._roi_anchor_bbox = (sx1, sy1, sx2, sy2)
+        self._roi_anchor_last_seen_ms = now_ms
 
     @staticmethod
     def _bbox_iou(a, b) -> float:
@@ -422,3 +457,36 @@ class AutoFishWorker:
         zone_top = y1 + float(band.top)
         zone_bottom = y1 + float(band.bottom)
         return fish_y, zone_y, zone_top, zone_bottom
+
+    def _stabilize_measurements(self, fish_y, zone_y, zone_top, zone_bottom):
+        fish_s = self._smooth_signal("fish_y", fish_y)
+        top_s = self._smooth_signal("zone_top", zone_top)
+        bot_s = self._smooth_signal("zone_bottom", zone_bottom)
+        if top_s is not None and bot_s is not None:
+            if bot_s < top_s:
+                top_s, bot_s = bot_s, top_s
+            center_s = (top_s + bot_s) * 0.5
+        else:
+            center_s = self._smooth_signal("zone_center", zone_y)
+        return fish_s, center_s, top_s, bot_s
+
+    def _smooth_signal(self, key: str, value: float | None) -> float | None:
+        if value is None:
+            return None
+        v = float(value)
+        prev = self._smooth_values.get(key)
+        if prev is not None and abs(v - prev) > self._signal_jump_px:
+            v = prev + (self._signal_jump_px if v > prev else -self._signal_jump_px)
+        if prev is None:
+            smoothed = v
+        else:
+            smoothed = prev * (1.0 - self._signal_alpha) + v * self._signal_alpha
+        self._smooth_values[key] = smoothed
+        hist = self._signal_hist.get(key)
+        if hist is None:
+            return smoothed
+        hist.append(smoothed)
+        if len(hist) < 3:
+            return smoothed
+        vals = sorted(hist)
+        return vals[1]
