@@ -14,7 +14,7 @@ from .input_controller import InputMode, SmartInputController
 from .gui_logic import choose_vrchat_candidates, state_to_cn
 from .osc_input import OscInputSink
 from .vision import YoloVision
-from .win32_api import list_visible_windows
+from .win32_api import Win32InputSink, list_visible_windows
 from .worker import AutoFishWorker
 
 
@@ -212,7 +212,8 @@ class AutoFishApp(tk.Tk):
         if 0 not in detector.model.names or 1 not in detector.model.names:
             self._log("warning: model missing class 0 or 1, detection flow may fail")
         capture = WindowCapture(hwnd=hwnd, window_name=title)
-        sink = OscInputSink(cfg=cfg)
+        win32_sink = Win32InputSink(hwnd=hwnd)
+        sink = OscInputSink(cfg=cfg, win32_sink=win32_sink)
         input_ctl = SmartInputController(sink=sink, retry_limit=cfg.input_retry_limit, start_mode=InputMode.MESSAGE)
         self._worker = AutoFishWorker(
             cfg=cfg,

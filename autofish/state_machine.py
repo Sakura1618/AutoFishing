@@ -27,12 +27,14 @@ class FishingStateMachine:
         self.success_disappear_ms = success_disappear_ms
         self.state = AutoFishState.CAST
         self._cast_started_ms: int | None = None
+        self._cast_clicked_ms: int | None = None
         self._bar_missing_since_ms: int | None = None
         self._bite_latched = False
 
     def reset(self) -> None:
         self.state = AutoFishState.CAST
         self._cast_started_ms = None
+        self._cast_clicked_ms = None
         self._bar_missing_since_ms = None
         self._bite_latched = False
 
@@ -41,9 +43,13 @@ class FishingStateMachine:
         if self.state == AutoFishState.CAST:
             if self._cast_started_ms is None:
                 self._cast_started_ms = now_ms
-                out.click_cast = True
                 return out
-            if now_ms - self._cast_started_ms >= int(self.cast_wait_s * 1000):
+            if self._cast_clicked_ms is None:
+                if now_ms - self._cast_started_ms >= 500:
+                    out.click_cast = True
+                    self._cast_clicked_ms = now_ms
+                return out
+            if now_ms - self._cast_clicked_ms >= int(self.cast_wait_s * 1000):
                 out.hold_back_s = self.move_back_s
                 self.state = AutoFishState.WAIT_BITE
             return out

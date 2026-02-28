@@ -10,7 +10,7 @@ class AutoFishConfig:
     conf_yolo1: float = 0.5
     roi_expand: float = 0.2
     success_disappear_ms: int = 500
-    cast_wait_s: float = 1.0
+    cast_wait_s: float = 0.5
     move_back_s: float = 0.5
     move_forward_s: float = 0.5
     loop_fps: int = 20

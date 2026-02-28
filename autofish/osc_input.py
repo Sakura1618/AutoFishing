@@ -8,9 +8,10 @@ from .win32_api import VK_S, VK_W
 
 
 class OscInputSink:
-    def __init__(self, cfg: AutoFishConfig) -> None:
+    def __init__(self, cfg: AutoFishConfig, win32_sink=None) -> None:
         self.cfg = cfg
         self.client = OscClient(cfg.osc_host, cfg.osc_port)
+        self.win32_sink = win32_sink
         self._left_held = False
 
     def _pulse_button(self, address: str, duration_s: float = 0.05) -> bool:
@@ -44,6 +45,11 @@ class OscInputSink:
         return self.key_hold_message(vk_code, duration_s)
 
     def set_left_hold_message(self, hold: bool) -> bool:
+        if self.win32_sink is not None:
+            ok = bool(self.win32_sink.set_left_hold_sendinput(hold))
+            if ok:
+                self._left_held = hold
+            return ok
         if hold == self._left_held:
             return True
         ok_button = self.client.send_button(self.cfg.osc_click_button, hold)
@@ -57,6 +63,11 @@ class OscInputSink:
         return self.set_left_hold_message(hold)
 
     def release_all(self) -> None:
+        if self.win32_sink is not None:
+            try:
+                self.win32_sink.release_all()
+            except Exception:
+                pass
         if self._left_held:
             self.client.send_button(self.cfg.osc_click_button, False)
             self.client.send_axis(self.cfg.osc_click_axis, 0.0)

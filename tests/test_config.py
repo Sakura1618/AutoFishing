@@ -5,7 +5,7 @@ from autofish.config import AutoFishConfig, pick_default_model_path, resolve_mod
 
 def test_default_config_values():
     cfg = AutoFishConfig()
-    assert cfg.cast_wait_s == 1.0
+    assert cfg.cast_wait_s == 0.5
     assert cfg.move_back_s == 0.5
     assert cfg.move_forward_s == 0.5
     assert cfg.success_disappear_ms == 500
