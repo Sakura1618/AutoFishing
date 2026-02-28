@@ -4,6 +4,8 @@ import threading
 import time
 from typing import Callable
 
+import cv2
+
 from .config import AutoFishConfig
 from .minigame import HoldAction, MinigameController
 from .state_machine import AutoFishState, FishingStateMachine
@@ -19,6 +21,7 @@ class AutoFishWorker:
         input_ctl,
         log_cb: Callable[[str], None] | None = None,
         status_cb: Callable[[str], None] | None = None,
+        preview_cb: Callable[[object, object], None] | None = None,
     ) -> None:
         self.cfg = cfg
         self.detector = detector
@@ -26,6 +29,7 @@ class AutoFishWorker:
         self.input_ctl = input_ctl
         self.log_cb = log_cb or (lambda _: None)
         self.status_cb = status_cb or (lambda _: None)
+        self.preview_cb = preview_cb or (lambda _a, _b: None)
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
         self._sm = FishingStateMachine(
@@ -36,6 +40,10 @@ class AutoFishWorker:
         )
         self._mini = MinigameController()
         self._tick_count = 0
+        self._last_det = {"has_bite": False, "has_bar": False, "bar_bbox": None, "fish_y": None, "zone_y": None, "boxes": []}
+        self._last_infer_ts = 0.0
+        self._bite_hits = 0
+        self._bar_hits = 0
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -59,7 +67,21 @@ class AutoFishWorker:
             self._tick_count += 1
             t0 = time.time()
             frame = self.capture.grab()
-            det = self.detector.detect(frame)
+            now = time.time()
+            infer_interval = 1.0 / max(1, self.cfg.infer_fps)
+            if now - self._last_infer_ts >= infer_interval:
+                try:
+                    det = self.detector.detect(frame, imgsz=self.cfg.imgsz)
+                except TypeError:
+                    det = self.detector.detect(frame)
+                self._last_det = det
+                self._last_infer_ts = now
+            else:
+                det = self._last_det
+            if det.get("has_bite"):
+                self._bite_hits += 1
+            if det.get("has_bar"):
+                self._bar_hits += 1
             if self._tick_count % max(1, self.cfg.loop_fps * 2) == 0:
                 if frame is None:
                     self.log_cb("diag: capture frame is None")
@@ -68,6 +90,12 @@ class AutoFishWorker:
                         f"diag: has_bite={bool(det.get('has_bite'))}, "
                         f"has_bar={bool(det.get('has_bar'))}, fish_y={det.get('fish_y')}, zone_y={det.get('zone_y')}"
                     )
+                    self.log_cb(
+                        f"diag: yolo_hits_2s bite={self._bite_hits}, bar={self._bar_hits}, "
+                        f"conf0={self.cfg.conf_yolo0:.2f}, conf1={self.cfg.conf_yolo1:.2f}, imgsz={self.cfg.imgsz}"
+                    )
+                    self._bite_hits = 0
+                    self._bar_hits = 0
             now_ms = int(time.time() * 1000)
             out = self._sm.tick(now_ms=now_ms, has_bite=bool(det.get("has_bite")), has_bar=bool(det.get("has_bar")))
             self.status_cb(self._sm.state.value)
@@ -82,6 +110,7 @@ class AutoFishWorker:
             if out.click_collect:
                 self.input_ctl.click_left()
                 self.log_cb("collect click")
+                self.status_cb("success")
             if out.hold_forward_s > 0:
                 if hasattr(self.input_ctl, "hold_key_for"):
                     self.input_ctl.hold_key_for(VK_W, out.hold_forward_s)
@@ -99,6 +128,42 @@ class AutoFishWorker:
                         if hasattr(self.input_ctl, "set_left_hold"):
                             self.input_ctl.set_left_hold(False)
 
+            yolo_preview, roi_preview = self._build_previews(frame, det)
+            self.preview_cb(yolo_preview, roi_preview)
+
             elapsed = time.time() - t0
             if elapsed < frame_interval:
                 time.sleep(frame_interval - elapsed)
+
+    def _build_previews(self, frame, det):
+        if frame is None:
+            return None, None
+        yolo = frame.copy()
+        for b in det.get("boxes", []):
+            x1, y1, x2, y2 = b["bbox"]
+            cls_id = b["cls"]
+            conf = b["conf"]
+            color = (0, 255, 255) if cls_id == 0 else (0, 180, 0)
+            cv2.rectangle(yolo, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(yolo, f"{cls_id}:{conf:.2f}", (x1, max(16, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        bar = det.get("bar_bbox")
+        roi = None
+        if bar is not None:
+            x1, y1, x2, y2 = bar
+            h, w = frame.shape[:2]
+            x1 = max(0, min(x1, w - 1))
+            x2 = max(0, min(x2, w))
+            y1 = max(0, min(y1, h - 1))
+            y2 = max(0, min(y2, h))
+            if x2 > x1 and y2 > y1:
+                roi = frame[y1:y2, x1:x2].copy()
+                fish_y = det.get("fish_y")
+                zone_y = det.get("zone_y")
+                if fish_y is not None:
+                    fy = int(float(fish_y) - y1)
+                    cv2.line(roi, (0, fy), (roi.shape[1] - 1, fy), (0, 0, 255), 2)
+                if zone_y is not None:
+                    zy = int(float(zone_y) - y1)
+                    cv2.line(roi, (0, zy), (roi.shape[1] - 1, zy), (255, 255, 255), 2)
+        return yolo, roi

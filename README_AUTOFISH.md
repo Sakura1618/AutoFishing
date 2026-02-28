@@ -14,7 +14,8 @@ powershell -ExecutionPolicy Bypass -File "D:\Repositories\AutoFishing\run_autofi
 
 ## Workflow
 
-1. Select target window from list (`VRChat`).
+1. Refresh window list and select VRChat window.
+: If multiple VRChat windows are found, app prompts you to choose.
 2. Confirm model path (`.pt`) in GUI.
 3. Confirm OSC host/port (`127.0.0.1:9000` by default).
 3. Click `Start`.
@@ -26,5 +27,10 @@ powershell -ExecutionPolicy Bypass -File "D:\Repositories\AutoFishing\run_autofi
 - Default mappings:
   - Click / Hold: `/input/UseRight` + `/input/UseAxisRight`
   - Move back/forward: `/input/Vertical` (`-1` / `+1`)
+- GUI includes runtime controls:
+  - `conf0/conf1`, `inferFPS`, `loopFPS`, `imgsz`
+- GUI preview includes:
+  - YOLO full-frame preview
+  - ROI OpenCV preview
 - `yolo_train` remains dedicated to manual model training only.
 - Default fishing sequence follows `自动钓鱼.txt`.

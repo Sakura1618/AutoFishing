@@ -3,11 +3,15 @@ from __future__ import annotations
 import queue
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
+
+import cv2
+from PIL import Image, ImageTk
 
 from .capture import WindowCapture
 from .config import AutoFishConfig, pick_default_model_path, resolve_model_path
 from .input_controller import InputMode, SmartInputController
+from .gui_logic import choose_vrchat_candidates, state_to_cn
 from .osc_input import OscInputSink
 from .vision import YoloVision
 from .win32_api import list_visible_windows
@@ -22,16 +26,25 @@ class AutoFishApp(tk.Tk):
 
         self._worker: AutoFishWorker | None = None
         self._log_q: queue.Queue[str] = queue.Queue()
+        self._preview_q: queue.Queue[tuple[object, object]] = queue.Queue()
         self._status_var = tk.StringVar(value="idle")
         self._mode_var = tk.StringVar(value="message")
         self._window_var = tk.StringVar()
         self._model_var = tk.StringVar(value=str(pick_default_model_path(Path(__file__).resolve().parents[1])))
         self._osc_host_var = tk.StringVar(value="127.0.0.1")
         self._osc_port_var = tk.StringVar(value="9000")
+        self._conf0_var = tk.StringVar(value="0.50")
+        self._conf1_var = tk.StringVar(value="0.50")
+        self._infer_fps_var = tk.StringVar(value="10")
+        self._loop_fps_var = tk.StringVar(value="20")
+        self._imgsz_var = tk.StringVar(value="640")
         self._windows: list[tuple[int, str]] = []
+        self._yolo_imgtk = None
+        self._roi_imgtk = None
 
         self._build_ui()
         self.after(120, self._drain_logs)
+        self.after(80, self._drain_previews)
         self.refresh_windows()
 
     def _build_ui(self) -> None:
@@ -56,6 +69,20 @@ class AutoFishApp(tk.Tk):
         ttk.Entry(osc_row, textvariable=self._osc_host_var, width=24).pack(side=tk.LEFT)
         ttk.Label(osc_row, text=":").pack(side=tk.LEFT, padx=4)
         ttk.Entry(osc_row, textvariable=self._osc_port_var, width=8).pack(side=tk.LEFT)
+
+        ttk.Label(top, text="YOLO").grid(row=3, column=0, sticky="w")
+        yolo_row = ttk.Frame(top)
+        yolo_row.grid(row=3, column=1, sticky="ew", padx=8)
+        ttk.Label(yolo_row, text="conf0").pack(side=tk.LEFT)
+        ttk.Entry(yolo_row, textvariable=self._conf0_var, width=6).pack(side=tk.LEFT, padx=(4, 8))
+        ttk.Label(yolo_row, text="conf1").pack(side=tk.LEFT)
+        ttk.Entry(yolo_row, textvariable=self._conf1_var, width=6).pack(side=tk.LEFT, padx=(4, 8))
+        ttk.Label(yolo_row, text="inferFPS").pack(side=tk.LEFT)
+        ttk.Entry(yolo_row, textvariable=self._infer_fps_var, width=6).pack(side=tk.LEFT, padx=(4, 8))
+        ttk.Label(yolo_row, text="loopFPS").pack(side=tk.LEFT)
+        ttk.Entry(yolo_row, textvariable=self._loop_fps_var, width=6).pack(side=tk.LEFT, padx=(4, 8))
+        ttk.Label(yolo_row, text="imgsz").pack(side=tk.LEFT)
+        ttk.Entry(yolo_row, textvariable=self._imgsz_var, width=7).pack(side=tk.LEFT, padx=(4, 0))
         top.columnconfigure(1, weight=1)
 
         btns = ttk.Frame(root)
@@ -67,7 +94,14 @@ class AutoFishApp(tk.Tk):
         ttk.Label(btns, text="Input:").pack(side=tk.LEFT, padx=(18, 4))
         ttk.Label(btns, textvariable=self._mode_var).pack(side=tk.LEFT)
 
-        self.log_box = tk.Text(root, height=24, state=tk.DISABLED)
+        preview = ttk.Frame(root)
+        preview.pack(fill=tk.X, pady=(2, 8))
+        self.yolo_panel = ttk.Label(preview, text="YOLO预览")
+        self.yolo_panel.pack(side=tk.LEFT, padx=(0, 8))
+        self.roi_panel = ttk.Label(preview, text="ROI预览")
+        self.roi_panel.pack(side=tk.LEFT)
+
+        self.log_box = tk.Text(root, height=16, state=tk.DISABLED)
         self.log_box.pack(fill=tk.BOTH, expand=True)
 
     def pick_model(self) -> None:
@@ -79,8 +113,55 @@ class AutoFishApp(tk.Tk):
         self._windows = list_visible_windows()
         titles = [f"{title} (HWND={hwnd})" for hwnd, title in self._windows]
         self.window_combo["values"] = titles
-        if titles and not self._window_var.get():
-            self._window_var.set(titles[0])
+        self._auto_pick_vrchat()
+
+    def _auto_pick_vrchat(self) -> None:
+        matches = choose_vrchat_candidates(self._windows)
+        if not matches:
+            self._log("未找到标题包含 VRChat 的窗口")
+            return
+        if len(matches) == 1:
+            hwnd, title = matches[0]
+            self._window_var.set(f"{title} (HWND={hwnd})")
+            self._log(f"自动选中窗口: {title}")
+            return
+        picked = self._choose_window_dialog(matches)
+        if picked is not None:
+            hwnd, title = picked
+            self._window_var.set(f"{title} (HWND={hwnd})")
+            self._log(f"已选择窗口: {title}")
+
+    def _choose_window_dialog(self, candidates: list[tuple[int, str]]) -> tuple[int, str] | None:
+        dlg = tk.Toplevel(self)
+        dlg.title("选择 VRChat 窗口")
+        dlg.geometry("700x320")
+        dlg.transient(self)
+        dlg.grab_set()
+        ttk.Label(dlg, text="检测到多个 VRChat 窗口，请选择一个：").pack(anchor="w", padx=12, pady=(10, 6))
+        lb = tk.Listbox(dlg, height=12)
+        lb.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 10))
+        for hwnd, title in candidates:
+            lb.insert(tk.END, f"{title} (HWND={hwnd})")
+        lb.selection_set(0)
+        result = {"idx": None}
+
+        def _ok():
+            sel = lb.curselection()
+            if sel:
+                result["idx"] = sel[0]
+            dlg.destroy()
+
+        def _cancel():
+            dlg.destroy()
+
+        btn = ttk.Frame(dlg)
+        btn.pack(fill=tk.X, padx=12, pady=(0, 10))
+        ttk.Button(btn, text="确定", command=_ok).pack(side=tk.LEFT)
+        ttk.Button(btn, text="取消", command=_cancel).pack(side=tk.LEFT, padx=8)
+        dlg.wait_window()
+        if result["idx"] is None:
+            return None
+        return candidates[result["idx"]]
 
     def _selected_hwnd(self) -> int:
         selected = self._window_var.get()
@@ -94,14 +175,25 @@ class AutoFishApp(tk.Tk):
         if self._worker is not None:
             self._log("worker already running")
             return
+        if not self._window_var.get():
+            self._auto_pick_vrchat()
         hwnd = self._selected_hwnd()
         if not hwnd:
             self._log("no target window selected")
             return
-        cfg = AutoFishConfig(
-            osc_host=self._osc_host_var.get().strip() or "127.0.0.1",
-            osc_port=int(self._osc_port_var.get().strip() or "9000"),
-        )
+        try:
+            cfg = AutoFishConfig(
+                osc_host=self._osc_host_var.get().strip() or "127.0.0.1",
+                osc_port=int(self._osc_port_var.get().strip() or "9000"),
+                conf_yolo0=float(self._conf0_var.get().strip() or "0.5"),
+                conf_yolo1=float(self._conf1_var.get().strip() or "0.5"),
+                infer_fps=int(self._infer_fps_var.get().strip() or "10"),
+                loop_fps=int(self._loop_fps_var.get().strip() or "20"),
+                imgsz=int(self._imgsz_var.get().strip() or "640"),
+            )
+        except ValueError:
+            messagebox.showerror("参数错误", "YOLO/OSC 参数格式不正确，请检查数字输入。")
+            return
         model = resolve_model_path(self._model_var.get(), Path(__file__).resolve().parents[1])
         detector = YoloVision(str(model), conf_yolo0=cfg.conf_yolo0, conf_yolo1=cfg.conf_yolo1)
         self._log(f"model loaded: {model}")
@@ -117,7 +209,8 @@ class AutoFishApp(tk.Tk):
             capture=capture,
             input_ctl=input_ctl,
             log_cb=self._log_q.put,
-            status_cb=self._status_var.set,
+            status_cb=lambda s: self._status_var.set(state_to_cn(s)),
+            preview_cb=lambda a, b: self._preview_q.put((a, b)),
         )
         self._worker.start()
         self._mode_var.set("osc")
@@ -141,3 +234,24 @@ class AutoFishApp(tk.Tk):
             self.log_box.see(tk.END)
             self.log_box.configure(state=tk.DISABLED)
         self.after(120, self._drain_logs)
+
+    def _drain_previews(self) -> None:
+        while not self._preview_q.empty():
+            yolo_frame, roi_frame = self._preview_q.get_nowait()
+            if yolo_frame is not None:
+                self._yolo_imgtk = self._to_imgtk(yolo_frame, 520, 290)
+                self.yolo_panel.configure(image=self._yolo_imgtk, text="")
+            if roi_frame is not None:
+                self._roi_imgtk = self._to_imgtk(roi_frame, 260, 290)
+                self.roi_panel.configure(image=self._roi_imgtk, text="")
+        self.after(80, self._drain_previews)
+
+    @staticmethod
+    def _to_imgtk(bgr_frame, max_w: int, max_h: int):
+        rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
+        h, w = rgb.shape[:2]
+        scale = min(max_w / max(1, w), max_h / max(1, h), 1.0)
+        if scale < 1.0:
+            rgb = cv2.resize(rgb, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        image = Image.fromarray(rgb)
+        return ImageTk.PhotoImage(image=image)

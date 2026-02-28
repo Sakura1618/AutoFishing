@@ -24,23 +24,32 @@ class YoloVision:
         self.conf_yolo0 = conf_yolo0
         self.conf_yolo1 = conf_yolo1
 
-    def detect(self, frame: np.ndarray | None) -> dict[str, Any]:
+    def detect(self, frame: np.ndarray | None, imgsz: int = 640) -> dict[str, Any]:
         if frame is None:
-            return {"has_bite": False, "has_bar": False, "bar_bbox": None, "fish_y": None, "zone_y": None}
-        result = self.model.predict(frame, verbose=False, conf=min(self.conf_yolo0, self.conf_yolo1), max_det=20)[0]
+            return {"has_bite": False, "has_bar": False, "bar_bbox": None, "fish_y": None, "zone_y": None, "boxes": []}
+        result = self.model.predict(frame, verbose=False, conf=min(self.conf_yolo0, self.conf_yolo1), max_det=20, imgsz=imgsz)[0]
         has_bite = False
         bar_bbox: tuple[int, int, int, int] | None = None
+        boxes: list[dict[str, Any]] = []
         for box in result.boxes:
             cls_id = int(box.cls.item())
             conf = float(box.conf.item())
             xyxy = box.xyxy[0].tolist()
+            x1, y1, x2, y2 = map(int, xyxy)
+            boxes.append({"cls": cls_id, "conf": conf, "bbox": (x1, y1, x2, y2)})
             if cls_id == 0 and conf >= self.conf_yolo0:
                 has_bite = True
             if cls_id == 1 and conf >= self.conf_yolo1:
-                x1, y1, x2, y2 = map(int, xyxy)
                 bar_bbox = (x1, y1, x2, y2)
         fish_y, zone_y = estimate_fish_and_zone(frame, bar_bbox)
-        return {"has_bite": has_bite, "has_bar": bar_bbox is not None, "bar_bbox": bar_bbox, "fish_y": fish_y, "zone_y": zone_y}
+        return {
+            "has_bite": has_bite,
+            "has_bar": bar_bbox is not None,
+            "bar_bbox": bar_bbox,
+            "fish_y": fish_y,
+            "zone_y": zone_y,
+            "boxes": boxes,
+        }
 
 
 def estimate_fish_and_zone(frame: np.ndarray, bar_bbox: tuple[int, int, int, int] | None) -> tuple[float | None, float | None]:
@@ -65,4 +74,3 @@ def estimate_fish_and_zone(frame: np.ndarray, bar_bbox: tuple[int, int, int, int
     min_val, _, min_loc, _ = cv2.minMaxLoc(blur)
     fish_y = float(min_loc[1] + y1) if min_val < 150 else None
     return fish_y, zone_y
-
