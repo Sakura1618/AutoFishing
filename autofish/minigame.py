@@ -69,14 +69,12 @@ class FishTemplateMatcher:
         lost_hold_ms: int = 300,
     ) -> "FishTemplateMatcher":
         packs: list[TemplatePack] = []
-        for p in sorted(template_dir.glob("*.png")) + sorted(template_dir.glob("*.jpg")) + sorted(template_dir.glob("*.jpeg")):
-            img = cv2.imread(str(p), cv2.IMREAD_COLOR)
-            if img is None:
+        files = sorted(template_dir.glob("*.png")) + sorted(template_dir.glob("*.jpg")) + sorted(template_dir.glob("*.jpeg"))
+        files = sorted(files, key=lambda p: (0 if p.name.lower() == "fish.png" else 1, p.name.lower()))
+        for p in files:
+            edge = _template_edge_from_file(p)
+            if edge is None:
                 continue
-            crop = _extract_fish_shape_crop(img)
-            if crop is None:
-                continue
-            edge = cv2.Canny(crop, 50, 120)
             if edge.shape[0] < 6 or edge.shape[1] < 6:
                 continue
             packs.append(TemplatePack(name=p.name, edge=edge))
@@ -171,3 +169,22 @@ def _extract_fish_shape_crop(img_bgr: np.ndarray) -> np.ndarray | None:
     y2 = min(h, y + ch + pad)
     return gray[y1:y2, x1:x2]
 
+
+def _template_edge_from_file(path: Path) -> np.ndarray | None:
+    # Prefer transparent fish template if available (fish.png with alpha channel).
+    img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return None
+    if img.ndim == 3 and img.shape[2] == 4:
+        alpha = img[:, :, 3]
+        _, mask = cv2.threshold(alpha, 1, 255, cv2.THRESH_BINARY)
+        edge = cv2.Canny(mask, 50, 120)
+        if np.count_nonzero(edge) > 10:
+            return edge
+    bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if bgr is None:
+        return None
+    crop = _extract_fish_shape_crop(bgr)
+    if crop is None:
+        return None
+    return cv2.Canny(crop, 50, 120)
