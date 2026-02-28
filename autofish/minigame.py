@@ -193,6 +193,31 @@ class FishTemplateMatcher:
         self._last_hit_ms: int = 0
 
     @classmethod
+    def from_template_file(
+        cls,
+        template_file: Path,
+        scales: Sequence[float] = (0.9, 1.0, 1.1),
+        threshold: float = 0.55,
+        lost_hold_ms: int = 300,
+        local_expand: float = 2.0,
+        local_track_ms: int = 280,
+        smooth_alpha: float = 0.45,
+    ) -> "FishTemplateMatcher":
+        edge = _template_edge_from_file(template_file)
+        if edge is None or edge.shape[0] < 6 or edge.shape[1] < 6:
+            raise RuntimeError(f"Invalid fish template: {template_file}")
+        pack = TemplatePack(name=template_file.name, edge=edge)
+        return cls(
+            [pack],
+            scales=scales,
+            threshold=threshold,
+            lost_hold_ms=lost_hold_ms,
+            local_expand=local_expand,
+            local_track_ms=local_track_ms,
+            smooth_alpha=smooth_alpha,
+        )
+
+    @classmethod
     def from_template_dir(
         cls,
         template_dir: Path,

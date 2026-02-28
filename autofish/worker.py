@@ -3,10 +3,10 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Callable
 
 import cv2
-from pathlib import Path
 
 from .config import AutoFishConfig
 from .minigame import FishTemplateMatcher, HoldAction, MinigameController, detect_dark_blob_center, detect_white_zone_band
@@ -43,16 +43,28 @@ class AutoFishWorker:
             success_disappear_ms=cfg.success_disappear_ms,
         )
         self._mini = MinigameController(hold_decreases_y=False)
+        self._template_file = Path.cwd() / "img" / "fish.png"
         try:
-            self._matcher = FishTemplateMatcher.from_template_dir(
-                Path.cwd() / "img",
-                threshold=0.55,
-                scales=(0.9, 1.0, 1.1),
-                lost_hold_ms=300,
-                local_expand=2.1,
-                local_track_ms=300,
-                smooth_alpha=0.40,
-            )
+            if self._template_file.exists():
+                self._matcher = FishTemplateMatcher.from_template_file(
+                    self._template_file,
+                    threshold=0.55,
+                    scales=(0.9, 1.0, 1.1),
+                    lost_hold_ms=300,
+                    local_expand=2.1,
+                    local_track_ms=300,
+                    smooth_alpha=0.40,
+                )
+            else:
+                self._matcher = FishTemplateMatcher.from_template_dir(
+                    Path.cwd() / "img",
+                    threshold=0.55,
+                    scales=(0.9, 1.0, 1.1),
+                    lost_hold_ms=300,
+                    local_expand=2.1,
+                    local_track_ms=300,
+                    smooth_alpha=0.40,
+                )
         except Exception:
             self._matcher = None
         self._tick_count = 0
@@ -94,11 +106,17 @@ class AutoFishWorker:
         self._left_hold_since_ms = 0
         self._max_hold_ms = 260
         self._hold_cooldown_until_ms = 0
-        self._keep_tap_interval_ms = 90
-        self._keep_tap_hold_ms = 22
-        self._keep_tap_last_ms = 0
-        self._keep_tap_active = False
-        self._keep_tap_started_ms = 0
+        self._rel_dead_px = 2.0
+        self._tap_last_ms = 0
+        self._tap_active = False
+        self._tap_started_ms = 0
+        self._tap_hold_ms_current = 20
+        self._tap_hold_ms_light = 14
+        self._tap_hold_ms_mid = 20
+        self._tap_hold_ms_heavy = 36
+        self._tap_interval_ms_light = 115
+        self._tap_interval_ms_mid = 90
+        self._tap_interval_ms_heavy = 70
         self._bottom_rescue_margin_px = 2.5
         self._bottom_rescue_interval_ms = 75
         self._bottom_rescue_hold_ms = 26
@@ -225,9 +243,9 @@ class AutoFishWorker:
                 self._left_hold_active = False
                 self._left_hold_since_ms = 0
                 self._hold_cooldown_until_ms = 0
-                self._keep_tap_last_ms = 0
-                self._keep_tap_active = False
-                self._keep_tap_started_ms = 0
+                self._tap_last_ms = 0
+                self._tap_active = False
+                self._tap_started_ms = 0
                 self._bottom_rescue_active = False
                 self._bottom_rescue_started_ms = 0
                 self._bottom_rescue_last_ms = 0
@@ -256,37 +274,16 @@ class AutoFishWorker:
                 ready = self._update_minigame_ready(zone_y=None if zone_y is None else float(zone_y), now_ms=now_ms)
                 if not ready:
                     self._apply_left_hold(False, now_ms=now_ms)
-                    self._reset_keep_tap()
+                    self._reset_relative_tap()
                     self._reset_bottom_rescue()
                     self._last_hold_action = None
                 elif fish_y is not None and zone_y is not None:
                     self._reset_bottom_rescue()
                     self._last_mini_signal_ms = now_ms
-                    conservative = self._mini_template == "fallback-dark" or self._mini_score < 0.58
-                    action = self._mini.decide(
-                        fish_y=float(fish_y),
-                        zone_center_y=float(zone_y),
-                        zone_top_y=det.get("zone_top"),
-                        zone_bottom_y=det.get("zone_bottom"),
-                        conservative_mode=conservative,
-                        now_ms=now_ms,
-                    )
-                    if action == HoldAction.HOLD:
-                        self._reset_keep_tap()
-                        self._apply_left_hold(True, now_ms=now_ms)
-                        if self._last_hold_action != action:
-                            self.log_cb("minigame action: HOLD")
-                    elif action == HoldAction.RELEASE:
-                        self._reset_keep_tap()
-                        self._apply_left_hold(False, now_ms=now_ms)
-                        if self._last_hold_action != action:
-                            self.log_cb("minigame action: RELEASE")
-                    else:
-                        if self._fish_inside_white_zone(float(fish_y), det.get("zone_top"), det.get("zone_bottom")):
-                            self._apply_keep_tap(now_ms=now_ms)
-                        else:
-                            self._reset_keep_tap()
-                    self._last_hold_action = action
+                    rel_y = float(fish_y) - float(zone_y)
+                    det["rel_y"] = rel_y
+                    self._apply_relative_tap(rel_y=rel_y, now_ms=now_ms)
+                    self._last_hold_action = HoldAction.HOLD if self._left_hold_active else HoldAction.RELEASE
                 elif now_ms - self._last_mini_signal_ms >= self._mini_signal_timeout_ms:
                     if self._zone_near_bottom(det.get("zone_bottom"), det.get("bar_bbox")):
                         self._apply_bottom_rescue(now_ms=now_ms)
@@ -295,7 +292,7 @@ class AutoFishWorker:
                         self._apply_left_hold(False, now_ms=now_ms)
                         self._reset_bottom_rescue()
                         self._last_hold_action = None
-                    self._reset_keep_tap()
+                    self._reset_relative_tap()
 
             yolo_preview, roi_preview = self._build_previews(frame, det)
             self.preview_cb(yolo_preview, roi_preview)
@@ -384,10 +381,21 @@ class AutoFishWorker:
                     (120, 220, 255),
                     1,
                 )
+                rel_y = det.get("rel_y")
+                if rel_y is not None:
+                    cv2.putText(
+                        roi,
+                        f"rel_y:{float(rel_y):+.1f}",
+                        (4, 76),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (120, 255, 200),
+                        1,
+                    )
                 cv2.putText(
                     roi,
                     f"mode:{self._mini.last_mode}",
-                    (4, 76),
+                    (4, 94),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5,
                     (120, 255, 160),
@@ -397,7 +405,7 @@ class AutoFishWorker:
                     cv2.putText(
                         roi,
                         "ready:WAIT_DROP",
-                        (4, 94),
+                        (4, 112),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.5,
                         (80, 200, 255),
@@ -547,7 +555,7 @@ class AutoFishWorker:
             self._mini_prev_zone_y = None
             self._mini_drop_start_y = None
             self._apply_left_hold(False, now_ms=now_ms)
-            self._reset_keep_tap()
+            self._reset_relative_tap()
             self._reset_bottom_rescue()
         self._last_sm_state = self._sm.state
 
@@ -588,28 +596,31 @@ class AutoFishWorker:
         if want_hold:
             self._left_hold_since_ms = now_ms
 
-    @staticmethod
-    def _fish_inside_white_zone(fish_y: float, zone_top: float | None, zone_bottom: float | None) -> bool:
-        if zone_top is None or zone_bottom is None:
-            return False
-        top = float(zone_top) + 1.0
-        bottom = float(zone_bottom) - 1.0
-        return top <= fish_y <= bottom
+    def _apply_relative_tap(self, rel_y: float, now_ms: int) -> None:
+        if rel_y < -self._rel_dead_px:
+            hold_ms = self._tap_hold_ms_light
+            interval_ms = self._tap_interval_ms_light
+        elif rel_y > self._rel_dead_px:
+            hold_ms = self._tap_hold_ms_heavy
+            interval_ms = self._tap_interval_ms_heavy
+        else:
+            hold_ms = self._tap_hold_ms_mid
+            interval_ms = self._tap_interval_ms_mid
 
-    def _apply_keep_tap(self, now_ms: int) -> None:
-        if self._keep_tap_active:
-            if now_ms - self._keep_tap_started_ms >= self._keep_tap_hold_ms:
+        self._tap_hold_ms_current = hold_ms
+        if self._tap_active:
+            if now_ms - self._tap_started_ms >= self._tap_hold_ms_current:
                 self._apply_left_hold(False, now_ms=now_ms)
-                self._keep_tap_active = False
-                self._keep_tap_last_ms = now_ms
+                self._tap_active = False
+                self._tap_last_ms = now_ms
             return
-        if now_ms - self._keep_tap_last_ms >= self._keep_tap_interval_ms:
+        if now_ms - self._tap_last_ms >= interval_ms:
             self._apply_left_hold(True, now_ms=now_ms)
-            self._keep_tap_active = True
-            self._keep_tap_started_ms = now_ms
+            self._tap_active = True
+            self._tap_started_ms = now_ms
 
-    def _reset_keep_tap(self) -> None:
-        self._keep_tap_active = False
+    def _reset_relative_tap(self) -> None:
+        self._tap_active = False
 
     @staticmethod
     def _zone_near_bottom(zone_bottom: float | None, bar_bbox) -> bool:

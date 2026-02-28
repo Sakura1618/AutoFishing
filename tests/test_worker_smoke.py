@@ -54,6 +54,17 @@ def test_worker_uses_flipped_y_axis_for_minigame():
     assert worker._mini.hold_decreases_y is False
 
 
+def test_worker_prefers_fish_png_template_if_exists():
+    worker = AutoFishWorker(
+        cfg=AutoFishConfig(loop_fps=10),
+        detector=FakeDetector(),
+        capture=FakeCapture(),
+        input_ctl=FakeInput(),
+        log_cb=lambda _x: None,
+    )
+    assert worker._template_file.name == "fish.png"
+
+
 def test_worker_normalize_capture_result_tuple():
     frame, origin = AutoFishWorker._normalize_capture_result((object(), (123, 456)))
     assert origin == (123, 456)
@@ -172,7 +183,7 @@ def test_apply_left_hold_respects_cooldown():
     assert fake_in.hold_states == []
 
 
-def test_keep_tap_generates_short_hold_pulse():
+def test_relative_tap_generates_short_hold_pulse():
     fake_in = FakeInput()
     worker = AutoFishWorker(
         cfg=AutoFishConfig(loop_fps=10),
@@ -181,17 +192,26 @@ def test_keep_tap_generates_short_hold_pulse():
         input_ctl=fake_in,
         log_cb=lambda _x: None,
     )
-    worker._keep_tap_interval_ms = 50
-    worker._keep_tap_hold_ms = 20
-    worker._apply_keep_tap(now_ms=1000)
-    worker._apply_keep_tap(now_ms=1025)
+    worker._tap_interval_ms_mid = 50
+    worker._tap_hold_ms_mid = 20
+    worker._apply_relative_tap(rel_y=0.0, now_ms=1000)
+    worker._apply_relative_tap(rel_y=0.0, now_ms=1025)
     assert fake_in.hold_states[0] is True
     assert fake_in.hold_states[-1] is False
 
 
-def test_fish_inside_white_zone_check():
-    assert AutoFishWorker._fish_inside_white_zone(100.0, 90.0, 110.0) is True
-    assert AutoFishWorker._fish_inside_white_zone(89.0, 90.0, 110.0) is False
+def test_relative_tap_uses_heavier_hold_when_fish_below_center():
+    fake_in = FakeInput()
+    worker = AutoFishWorker(
+        cfg=AutoFishConfig(loop_fps=10),
+        detector=FakeDetector(),
+        capture=FakeCapture(),
+        input_ctl=fake_in,
+        log_cb=lambda _x: None,
+    )
+    worker._tap_interval_ms_heavy = 1
+    worker._apply_relative_tap(rel_y=5.0, now_ms=1000)
+    assert worker._tap_hold_ms_current == worker._tap_hold_ms_heavy
 
 
 def test_zone_near_bottom_check():
