@@ -57,6 +57,11 @@ class AutoFishWorker:
         self._stop_evt.set()
         if self._thread:
             self._thread.join(timeout=2.0)
+        if hasattr(self.capture, "close"):
+            try:
+                self.capture.close()
+            except Exception:
+                pass
         if hasattr(self.input_ctl, "release_all"):
             self.input_ctl.release_all()
         self.log_cb("worker stopped")
@@ -66,7 +71,8 @@ class AutoFishWorker:
         while not self._stop_evt.is_set():
             self._tick_count += 1
             t0 = time.time()
-            frame = self.capture.grab()
+            cap = self.capture.grab()
+            frame, frame_origin = self._normalize_capture_result(cap)
             now = time.time()
             infer_interval = 1.0 / max(1, self.cfg.infer_fps)
             if now - self._last_infer_ts >= infer_interval:
@@ -78,6 +84,20 @@ class AutoFishWorker:
                 self._last_infer_ts = now
             else:
                 det = self._last_det
+            det["origin"] = frame_origin
+            det["boxes_screen"] = [
+                {
+                    "cls": b["cls"],
+                    "conf": b["conf"],
+                    "bbox": (
+                        b["bbox"][0] + frame_origin[0],
+                        b["bbox"][1] + frame_origin[1],
+                        b["bbox"][2] + frame_origin[0],
+                        b["bbox"][3] + frame_origin[1],
+                    ),
+                }
+                for b in det.get("boxes", [])
+            ]
             if det.get("has_bite"):
                 self._bite_hits += 1
             if det.get("has_bar"):
@@ -88,7 +108,8 @@ class AutoFishWorker:
                 else:
                     self.log_cb(
                         f"diag: has_bite={bool(det.get('has_bite'))}, "
-                        f"has_bar={bool(det.get('has_bar'))}, fish_y={det.get('fish_y')}, zone_y={det.get('zone_y')}"
+                        f"has_bar={bool(det.get('has_bar'))}, fish_y={det.get('fish_y')}, zone_y={det.get('zone_y')}, "
+                        f"origin={frame_origin}"
                     )
                     self.log_cb(
                         f"diag: yolo_hits_2s bite={self._bite_hits}, bar={self._bar_hits}, "
@@ -167,3 +188,11 @@ class AutoFishWorker:
                     zy = int(float(zone_y) - y1)
                     cv2.line(roi, (0, zy), (roi.shape[1] - 1, zy), (255, 255, 255), 2)
         return yolo, roi
+
+    @staticmethod
+    def _normalize_capture_result(cap):
+        if cap is None:
+            return None, (0, 0)
+        if isinstance(cap, tuple) and len(cap) == 2:
+            return cap[0], cap[1]
+        return cap, (0, 0)

@@ -41,8 +41,13 @@ class AutoFishApp(tk.Tk):
         self._windows: list[tuple[int, str]] = []
         self._yolo_imgtk = None
         self._roi_imgtk = None
+        self._yolo_preview_win = None
+        self._roi_preview_win = None
+        self._yolo_preview_label = None
+        self._roi_preview_label = None
 
         self._build_ui()
+        self._build_preview_windows()
         self.after(120, self._drain_logs)
         self.after(80, self._drain_previews)
         self.refresh_windows()
@@ -94,15 +99,21 @@ class AutoFishApp(tk.Tk):
         ttk.Label(btns, text="Input:").pack(side=tk.LEFT, padx=(18, 4))
         ttk.Label(btns, textvariable=self._mode_var).pack(side=tk.LEFT)
 
-        preview = ttk.Frame(root)
-        preview.pack(fill=tk.X, pady=(2, 8))
-        self.yolo_panel = ttk.Label(preview, text="YOLO预览")
-        self.yolo_panel.pack(side=tk.LEFT, padx=(0, 8))
-        self.roi_panel = ttk.Label(preview, text="ROI预览")
-        self.roi_panel.pack(side=tk.LEFT)
-
         self.log_box = tk.Text(root, height=16, state=tk.DISABLED)
         self.log_box.pack(fill=tk.BOTH, expand=True)
+
+    def _build_preview_windows(self) -> None:
+        self._yolo_preview_win = tk.Toplevel(self)
+        self._yolo_preview_win.title("YOLO 实时预览")
+        self._yolo_preview_win.geometry("900x540")
+        self._yolo_preview_label = ttk.Label(self._yolo_preview_win, text="YOLO预览初始化中")
+        self._yolo_preview_label.pack(fill=tk.BOTH, expand=True)
+
+        self._roi_preview_win = tk.Toplevel(self)
+        self._roi_preview_win.title("OpenCV ROI 预览")
+        self._roi_preview_win.geometry("460x540")
+        self._roi_preview_label = ttk.Label(self._roi_preview_win, text="ROI预览初始化中")
+        self._roi_preview_label.pack(fill=tk.BOTH, expand=True)
 
     def pick_model(self) -> None:
         got = filedialog.askopenfilename(filetypes=[("PyTorch Model", "*.pt"), ("All Files", "*.*")])
@@ -163,13 +174,13 @@ class AutoFishApp(tk.Tk):
             return None
         return candidates[result["idx"]]
 
-    def _selected_hwnd(self) -> int:
+    def _selected_target(self) -> tuple[int, str]:
         selected = self._window_var.get()
         for hwnd, title in self._windows:
             text = f"{title} (HWND={hwnd})"
             if text == selected:
-                return hwnd
-        return 0
+                return hwnd, title
+        return 0, ""
 
     def start_worker(self) -> None:
         if self._worker is not None:
@@ -177,7 +188,7 @@ class AutoFishApp(tk.Tk):
             return
         if not self._window_var.get():
             self._auto_pick_vrchat()
-        hwnd = self._selected_hwnd()
+        hwnd, title = self._selected_target()
         if not hwnd:
             self._log("no target window selected")
             return
@@ -200,7 +211,7 @@ class AutoFishApp(tk.Tk):
         self._log(f"model classes: {detector.model.names}")
         if 0 not in detector.model.names or 1 not in detector.model.names:
             self._log("warning: model missing class 0 or 1, detection flow may fail")
-        capture = WindowCapture(hwnd=hwnd)
+        capture = WindowCapture(hwnd=hwnd, window_name=title)
         sink = OscInputSink(cfg=cfg)
         input_ctl = SmartInputController(sink=sink, retry_limit=cfg.input_retry_limit, start_mode=InputMode.MESSAGE)
         self._worker = AutoFishWorker(
@@ -239,11 +250,13 @@ class AutoFishApp(tk.Tk):
         while not self._preview_q.empty():
             yolo_frame, roi_frame = self._preview_q.get_nowait()
             if yolo_frame is not None:
-                self._yolo_imgtk = self._to_imgtk(yolo_frame, 520, 290)
-                self.yolo_panel.configure(image=self._yolo_imgtk, text="")
+                self._yolo_imgtk = self._to_imgtk(yolo_frame, 860, 500)
+                if self._yolo_preview_label is not None and self._yolo_preview_label.winfo_exists():
+                    self._yolo_preview_label.configure(image=self._yolo_imgtk, text="")
             if roi_frame is not None:
-                self._roi_imgtk = self._to_imgtk(roi_frame, 260, 290)
-                self.roi_panel.configure(image=self._roi_imgtk, text="")
+                self._roi_imgtk = self._to_imgtk(roi_frame, 430, 500)
+                if self._roi_preview_label is not None and self._roi_preview_label.winfo_exists():
+                    self._roi_preview_label.configure(image=self._roi_imgtk, text="")
         self.after(80, self._drain_previews)
 
     @staticmethod

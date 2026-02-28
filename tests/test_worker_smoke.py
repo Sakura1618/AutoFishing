@@ -35,3 +35,8 @@ def test_worker_starts_and_stops_cleanly():
     assert any("started" in msg for msg in logs)
     assert any("stopped" in msg for msg in logs)
 
+
+def test_worker_normalize_capture_result_tuple():
+    frame, origin = AutoFishWorker._normalize_capture_result((object(), (123, 456)))
+    assert origin == (123, 456)
+    assert frame is not None

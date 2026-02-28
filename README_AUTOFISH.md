@@ -29,8 +29,11 @@ powershell -ExecutionPolicy Bypass -File "D:\Repositories\AutoFishing\run_autofi
   - Move back/forward: `/input/Vertical` (`-1` / `+1`)
 - GUI includes runtime controls:
   - `conf0/conf1`, `inferFPS`, `loopFPS`, `imgsz`
-- GUI preview includes:
-  - YOLO full-frame preview
-  - ROI OpenCV preview
+- Preview is shown in two separate windows:
+  - `YOLO 实时预览`
+  - `OpenCV ROI 预览`
+- Capture backend:
+  - Prefer `windows-capture` (window-only content)
+  - Fallback to `PrintWindow` client-area crop
 - `yolo_train` remains dedicated to manual model training only.
 - Default fishing sequence follows `自动钓鱼.txt`.

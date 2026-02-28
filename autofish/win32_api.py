@@ -27,6 +27,10 @@ class RECT(ctypes.Structure):
     _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
 
 
+class POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
 class MOUSEINPUT(ctypes.Structure):
     _fields_ = [
         ("dx", wintypes.LONG),
@@ -87,6 +91,21 @@ def get_window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
     if not ok:
         return None
     return rect.left, rect.top, rect.right, rect.bottom
+
+
+def get_client_rect_screen(hwnd: int) -> tuple[int, int, int, int] | None:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    rect = RECT()
+    if not user32.GetClientRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
+        return None
+    pt = POINT(0, 0)
+    if not user32.ClientToScreen(wintypes.HWND(hwnd), ctypes.byref(pt)):
+        return None
+    width = rect.right - rect.left
+    height = rect.bottom - rect.top
+    if width <= 0 or height <= 0:
+        return None
+    return pt.x, pt.y, pt.x + width, pt.y + height
 
 
 class Win32InputSink:
